@@ -8,3 +8,4 @@ pub mod host;
 pub mod loader;
 pub mod midi;
 pub mod preset;
+pub mod scan;

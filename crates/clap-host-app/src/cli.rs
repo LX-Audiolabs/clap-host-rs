@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: clap-host-rs --plugin <path.clap> [--id <clap-id>] \
+pub const USAGE: &str = "usage: clap-host-rs [--scan | --plugin <path.clap> [--id <clap-id>] \
                          [--list-params] [--list-presets] \
                          [--pull-preset <key> --out <file>] [--set <id>=<val>]... \
-                         [--play [--output-device <name>]] [--list-midi] [--midi-in <name>]";
+                         [--play [--output-device <name>]] [--list-midi] [--midi-in <name>]]";
 
 // A CLI flag struct is exactly the case this lint doesn't help — each bool
 // is an independent switch, not related state that wants an enum.
@@ -14,6 +14,7 @@ pub const USAGE: &str = "usage: clap-host-rs --plugin <path.clap> [--id <clap-id
 pub struct Args {
     pub plugin_path: Option<String>,
     pub plugin_id: Option<String>,
+    pub scan: bool,
     pub play: bool,
     pub output_device: Option<String>,
     pub list_params: bool,
@@ -73,6 +74,7 @@ pub fn parse_args() -> Args {
                 a.pull_out = argv.get(i).map(PathBuf::from);
             }
             "--list-params" => a.list_params = true,
+            "--scan" => a.scan = true,
             "--list-presets" => a.list_presets = true,
             "--play" => a.play = true,
             "--list-midi" => a.list_midi = true,

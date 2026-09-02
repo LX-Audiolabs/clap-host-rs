@@ -6,7 +6,7 @@
 //!   clap-host-rs --plugin <path.clap> [--id <clap-id>] [--list-params]
 //!                [--list-presets] [--pull-preset <key> --out <file>]
 //!                [--set <id>=<val>]... [--play [--output-device <name>]]
-//!                [--list-midi] [--midi-in <name>]
+//!                [--list-midi] [--midi-in <name>] | --scan
 
 #![allow(clippy::missing_safety_doc)]
 
@@ -20,6 +20,7 @@ use clap_host_core::host::{make_host, pump_main_thread};
 use clap_host_core::loader::{self, Loader};
 use clap_host_core::midi;
 use clap_host_core::preset;
+use clap_host_core::scan;
 
 use clap_host_core::clap_sys::plugin::clap_plugin;
 
@@ -30,15 +31,19 @@ fn main() {
         print_midi_ports();
     }
 
+    if args.scan {
+        print_scan();
+    }
+
     let Some(path) = args.plugin_path.clone() else {
-        // --list-midi alone is a valid standalone query.
-        let standalone_midi = args.list_midi
+        // --scan and --list-midi alone are valid standalone queries.
+        let standalone = (args.scan || args.list_midi)
             && !args.play
             && !args.list_params
             && !args.list_presets
             && args.pull_preset.is_none()
             && args.sets.is_empty();
-        if !standalone_midi {
+        if !standalone {
             eprintln!("error: --plugin <path.clap> is required");
             eprintln!("{}", cli::USAGE);
             std::process::exit(1);
@@ -174,6 +179,37 @@ fn print_midi_ports() {
     println!("{} MIDI input port(s):", names.len());
     for (i, name) in names.iter().enumerate() {
         println!("  [{i}] {name}");
+    }
+}
+
+/// CLI `--scan`: walk the OS standard CLAP dirs and list every plugin.
+/// A broken .clap is a warning; the scan keeps going.
+fn print_scan() {
+    let paths = scan::scan();
+    if paths.is_empty() {
+        println!("no CLAP plugins found in standard dirs");
+        return;
+    }
+    println!("{} candidate(s) in standard dirs:", paths.len());
+    for path in &paths {
+        let Some(p) = path.to_str() else {
+            eprintln!("warn: {path:?}: not valid UTF-8, skipped");
+            continue;
+        };
+        let loader = match unsafe { Loader::open(p) } {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("warn: {p}: {e}");
+                continue;
+            }
+        };
+        for idx in 0..loader.plugin_count() {
+            if let Some(d) = loader.descriptor(idx) {
+                let name = unsafe { CStr::from_ptr(d.name) }.to_string_lossy();
+                let id = unsafe { CStr::from_ptr(d.id) }.to_string_lossy();
+                println!("{p}: {name}  id={id}");
+            }
+        }
     }
 }
 
