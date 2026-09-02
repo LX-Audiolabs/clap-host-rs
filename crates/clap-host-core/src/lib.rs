@@ -1,5 +1,7 @@
 //! CLAP host core — plugin loading, audio session, MIDI, presets, state, scan.
 
+pub use clap_sys;
+
 pub mod audio;
 pub mod events;
 pub mod host;
