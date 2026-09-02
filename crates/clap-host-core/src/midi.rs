@@ -48,7 +48,7 @@ pub fn open(want: Option<&str>, queue: &Queue<RawMidi>) -> Result<MidiInputConne
     let conn = mi
         .connect(
             &port,
-            "aura-host-in",
+            "clap-host-rs-in",
             move |_stamp, msg, ()| {
                 // Sysex is filtered by Ignore; anything else fits in 3 bytes.
                 if msg.is_empty() || msg[0] >= 0xF0 {
