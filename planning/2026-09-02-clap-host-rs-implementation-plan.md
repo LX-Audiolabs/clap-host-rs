@@ -25,7 +25,7 @@
 
 - Quelle `L:\LX-Audiolabs\AURA\crates\aura-host` und `L:\LX-Audiolabs\AURA\crates\aura-build\ui\` sind **read-only**.
 - Core (`clap-host-core`) hat **keine** Slint-Abhängigkeit; GUI-Code kommt nur in `clap-host-app`.
-- Rebrand: Host-Name `"CLAP-Host-RS"`, Vendor `"lxndrbe"`, URL `https://github.com/lxndrbe/CLAP-Host-RS`; MIDI-Client-Namen `clap-host-rs` / `clap-host-rs-list`.
+- Rebrand: Host-Name `"CLAP-Host-RS"`, Vendor `"lxndrbe"`, URL `https://github.com/lxndrbe/clap-host-rs`; MIDI-Client-Namen `clap-host-rs` / `clap-host-rs-list`.
 - Kein `windows-sys`, kein `raw-window-handle`, kein `win32_embed.rs` (V1 floating only).
 - CLI-Helfer mit `println!`/`process::exit` gehören in die App, nicht in den Core.
 - Lizenz MIT (nicht AURAs GPL). `publish = false`. Version `0.1.0`.
@@ -61,7 +61,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
-repository = "https://github.com/lxndrbe/CLAP-Host-RS"
+repository = "https://github.com/lxndrbe/clap-host-rs"
 authors = ["lxndrbe"]
 
 [workspace.lints.clippy]
@@ -191,7 +191,7 @@ git add -A && git commit -m "feat(core): port events module from aura-host"
 
 Neue Datei `host.rs`: übernehme aus aura `loader.rs` die Zeilen 39–203 (Statics `MAIN_THREAD`/`AUDIO_THREAD`, `mark_audio_thread`, Flag-Statics + `pump_main_thread`/`take_restart_request`/`take_gui_closed`, Extension-Statics `LOG_EXT`/`GUI_EXT`/`PARAMS_EXT`/`THREAD_CHECK_EXT`, `host_get_extension`, `make_host`). Anpassungen:
 - `use crate::events::sink_output_events;` und `use crate::events::Dialect;` (statt `crate::events::{Dialect, EvList, sink_output_events}` — `EvList` wird hier nicht gebraucht; exakten Bedarf aus dem Original prüfen).
-- Identity-Strings (Original loader.rs:186-188): name `"CLAP-Host-RS"`, vendor `"lxndrbe"`, url `https://github.com/lxndrbe/CLAP-Host-RS`.
+- Identity-Strings (Original loader.rs:186-188): name `"CLAP-Host-RS"`, vendor `"lxndrbe"`, url `https://github.com/lxndrbe/clap-host-rs`.
 - Alles `pub` machen, was loader/audio später brauchen (`make_host`, Pumpen/Take-Fns, `mark_audio_thread`).
 
 - [ ] **Step 2: loader.rs portieren**

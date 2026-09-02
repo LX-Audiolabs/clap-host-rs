@@ -100,7 +100,7 @@ pub fn list(loader: &Loader) -> Result<Vec<ListedPreset>, String> {
 
     let name = CString::new("clap-host-rs").unwrap_or_default();
     let vendor = CString::new("lxndrbe").unwrap_or_default();
-    let url = CString::new("").unwrap_or_default();
+    let url = CString::new("https://github.com/lxndrbe/clap-host-rs").unwrap_or_default();
     let version = CString::new(env!("CARGO_PKG_VERSION")).unwrap_or_default();
 
     let indexer = clap_preset_discovery_indexer {

@@ -386,7 +386,7 @@ pub fn make_host() -> &'static clap_host {
     let s = Box::leak(Box::new(Strings {
         name: CString::new("CLAP-Host-RS").unwrap(),
         vendor: CString::new("lxndrbe").unwrap(),
-        url: CString::new("https://github.com/lxndrbe/CLAP-Host-RS").unwrap(),
+        url: CString::new("https://github.com/lxndrbe/clap-host-rs").unwrap(),
         version: CString::new(env!("CARGO_PKG_VERSION")).unwrap(),
     }));
     Box::leak(Box::new(clap_host {

@@ -172,4 +172,4 @@ CLAP-Host-RS/
 - ~~License~~: **MIT** (entschieden, siehe Decisions)
 - Package publish: `publish = false` initially
 - Crate versions: `0.1.0`
-- Host-Identity-Strings: `"CLAP-Host-RS"` / `"lxndrbe"` / `https://github.com/lxndrbe/CLAP-Host-RS`
+- Host-Identity-Strings: `"CLAP-Host-RS"` / `"lxndrbe"` / `https://github.com/lxndrbe/clap-host-rs`

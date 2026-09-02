@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
-repository = "https://github.com/lxndrbe/CLAP-Host-RS"
+repository = "https://github.com/lxndrbe/clap-host-rs"
 authors = ["lxndrbe"]
 
 [workspace.lints.clippy]
