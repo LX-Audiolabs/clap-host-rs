@@ -5,7 +5,8 @@
 //! Usage:
 //!   clap-host-rs --plugin <path.clap> [--id <clap-id>] [--list-params]
 //!                [--list-presets] [--pull-preset <key> --out <file>]
-//!                [--set <id>=<val>]... [--play [--output-device <name>]
+//!                [--set <id>=<val>]... [--load-state <file>]
+//!                [--save-state <file>] [--play [--output-device <name>]
 //!                [--input-device <name>]] [--list-midi] [--midi-in <name>] |
 //!                --gui | --scan | --list-devices
 
@@ -23,6 +24,7 @@ use clap_host_core::loader::{self, Loader};
 use clap_host_core::midi;
 use clap_host_core::preset;
 use clap_host_core::scan;
+use clap_host_core::state;
 
 use clap_host_core::clap_sys::plugin::clap_plugin;
 
@@ -82,7 +84,9 @@ fn main() {
         || args.play
         || args.gui
         || !args.sets.is_empty()
-        || args.pull_preset.is_some();
+        || args.pull_preset.is_some()
+        || args.load_state.is_some()
+        || args.save_state.is_some();
     if !needs_instance {
         return;
     }
@@ -107,6 +111,14 @@ fn main() {
         std::process::exit(1);
     }
 
+    // --load-state right after init, so --set and --play see the restored values.
+    if let Some(path) = &args.load_state
+        && let Err(e) = state::load(plugin, path)
+    {
+        eprintln!("error: load state: {e}");
+        std::process::exit(1);
+    }
+
     // Applied while deactivated, so the values are in effect before activate().
     for (id, value) in &args.sets {
         match loader::set_param(plugin, *id, *value) {
@@ -119,6 +131,14 @@ fn main() {
         && let Err(e) = preset::pull(plugin, key, out)
     {
         eprintln!("error: pull preset: {e}");
+        std::process::exit(1);
+    }
+
+    // --save-state after --set/preset pull, before --play/--list-params.
+    if let Some(path) = &args.save_state
+        && let Err(e) = state::save(plugin, path)
+    {
+        eprintln!("error: save state: {e}");
         std::process::exit(1);
     }
 

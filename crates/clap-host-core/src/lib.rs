@@ -10,3 +10,4 @@ pub mod midi;
 pub mod plugin_gui;
 pub mod preset;
 pub mod scan;
+pub mod state;
