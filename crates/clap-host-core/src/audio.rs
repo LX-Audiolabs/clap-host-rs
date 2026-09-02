@@ -7,6 +7,8 @@
 
 use std::ptr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use clap_sys::{audio_buffer::clap_audio_buffer, plugin::clap_plugin, process::clap_process};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -43,6 +45,15 @@ pub struct Engine {
     steady_time: i64,
     /// Interleaved f32 samples from the capture thread, or `None` for silence.
     capture_buf: Option<Arc<ArrayQueue<f32>>>,
+    /// Set by `Session::drop`; the next callback stops the plugin on this
+    /// (audio) thread and acknowledges via `stopped`.
+    stop: Arc<AtomicBool>,
+    /// Ack from the audio thread: `stop_processing` has run (or was a no-op).
+    stopped: Arc<AtomicBool>,
+    /// `start_processing` has run on the audio thread.
+    started: bool,
+    /// `start_processing` returned false; stay silent instead of retrying.
+    start_failed: bool,
 }
 
 // Safety: the Engine is built on the main thread and then moved into the cpal
@@ -58,6 +69,8 @@ impl Engine {
         capture_buf: Option<Arc<ArrayQueue<f32>>>,
         midi_rx: Queue<RawMidi>,
         ui_rx: Queue<UiEvent>,
+        stop: Arc<AtomicBool>,
+        stopped: Arc<AtomicBool>,
     ) -> Self {
         let in_counts = loader::audio_port_channels(plugin, true);
         let mut out_counts = loader::audio_port_channels(plugin, false);
@@ -110,6 +123,10 @@ impl Engine {
             dialect: loader::note_dialect(plugin),
             steady_time: 0,
             capture_buf,
+            stop,
+            stopped,
+            started: false,
+            start_failed: false,
         }
     }
 
@@ -129,6 +146,28 @@ impl Engine {
     pub fn process(&mut self, data: &mut [f32]) {
         mark_audio_thread();
         if self.device_channels == 0 {
+            return;
+        }
+        // CLAP spec: start/stop_processing run on the audio thread. The
+        // session commands a stop via `stop`; this callback executes it here
+        // and acks via `stopped`, then keeps emitting silence until dropped.
+        if self.stop.load(Ordering::Acquire) {
+            self.halt_processing();
+            data.fill(0.0);
+            return;
+        }
+        if !self.started && !self.start_failed {
+            let p = self.plugin.0;
+            let ok = unsafe { (*p).start_processing }.is_none_or(|start| unsafe { start(p) });
+            if ok {
+                self.started = true;
+            } else {
+                eprintln!("plugin.start_processing returned false — output is silent");
+                self.start_failed = true;
+            }
+        }
+        if self.start_failed {
+            data.fill(0.0);
             return;
         }
         // ponytail: every queued MIDI message lands at frame 0 of the next block —
@@ -155,6 +194,19 @@ impl Engine {
             self.steady_time += frames as i64;
             done += frames;
         }
+    }
+
+    /// `stop_processing` on the audio thread, once. Acks unconditionally so
+    /// the drop side never waits forever (even if we never started).
+    fn halt_processing(&mut self) {
+        if self.started {
+            let p = self.plugin.0;
+            if let Some(stop) = unsafe { (*p).stop_processing } {
+                unsafe { stop(p) };
+            }
+            self.started = false;
+        }
+        self.stopped.store(true, Ordering::Release);
     }
 
     fn process_block(&mut self, frames: usize) {
@@ -252,6 +304,10 @@ pub struct Session {
     // Input stream second: can stop any time after output.
     _in_stream: Option<cpal::Stream>,
     plugin: PluginPtr,
+    /// Audio-thread stop command + ack for the start/stop_processing
+    /// handshake (owned by the engine inside the stream callback).
+    stop: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
     pub sample_rate: f64,
     pub device_channels: usize,
     pub in_ports: Vec<u32>,
@@ -261,9 +317,22 @@ pub struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        // The spec wants stop_processing on the audio thread. The stream is
+        // still playing, so the next callback sees `stop`, stops the plugin
+        // there and acks — normally within one buffer period.
+        self.stop.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while !self.stopped.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let p = self.plugin.0;
-        if let Some(stop) = unsafe { (*p).stop_processing } {
-            unsafe { stop(p) };
+        if !self.stopped.load(Ordering::Acquire) {
+            // The backend never ran the callback again; last-resort off-thread
+            // stop so deactivate doesn't precede stop_processing.
+            eprintln!("warn: audio thread did not ack stop — calling stop_processing off-thread");
+            if let Some(stop) = unsafe { (*p).stop_processing } {
+                unsafe { stop(p) };
+            }
         }
         if let Some(deactivate) = unsafe { (*p).deactivate } {
             unsafe { deactivate(p) };
@@ -329,16 +398,21 @@ pub fn open(
     {
         return Err("plugin.activate returned false".into());
     }
-    if let Some(start) = unsafe { (*plugin).start_processing }
-        && !unsafe { start(plugin) }
-    {
-        if let Some(deactivate) = unsafe { (*plugin).deactivate } {
-            unsafe { deactivate(plugin) };
-        }
-        return Err("plugin.start_processing returned false".into());
-    }
+    // `start_processing` is deliberately not called here: the CLAP spec wants
+    // it on the audio thread, so the engine calls it before its first
+    // process block (and stop_processing at the end, see `Session::drop`).
 
-    let mut engine = Engine::new(plugin, device_channels, capture_buf, midi_rx, ui_rx);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let mut engine = Engine::new(
+        plugin,
+        device_channels,
+        capture_buf,
+        midi_rx,
+        ui_rx,
+        Arc::clone(&stop),
+        Arc::clone(&stopped),
+    );
     let (in_ports, out_ports) = engine.port_layout();
     let dialect = engine.dialect();
 
@@ -354,13 +428,26 @@ pub fn open(
             |e| eprintln!("audio error: {e}"),
             None,
         )
-        .map_err(|e| format!("build_output_stream: {e}"))?;
-    stream.play().map_err(|e| format!("stream.play: {e}"))?;
+        .map_err(|e| {
+            // The plugin was activated above but never started — roll back.
+            if let Some(deactivate) = unsafe { (*plugin).deactivate } {
+                unsafe { deactivate(plugin) };
+            }
+            format!("build_output_stream: {e}")
+        })?;
+    if let Err(e) = stream.play() {
+        if let Some(deactivate) = unsafe { (*plugin).deactivate } {
+            unsafe { deactivate(plugin) };
+        }
+        return Err(format!("stream.play: {e}"));
+    }
 
     Ok(Session {
         _stream: stream,
         _in_stream: in_stream,
         plugin: PluginPtr(plugin),
+        stop,
+        stopped,
         sample_rate,
         device_channels,
         in_ports,
@@ -421,4 +508,114 @@ fn open_input(
     stream.play().map_err(|e| format!("stream.play: {e}"))?;
     eprintln!("audio in: {}", device_label(&device));
     Ok((buf, stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::thread::ThreadId;
+
+    /// (entry point, calling thread) pairs, in call order.
+    static CALLS: Mutex<Vec<(&'static str, ThreadId)>> = Mutex::new(Vec::new());
+
+    unsafe extern "C" fn fake_start(_: *const clap_plugin) -> bool {
+        CALLS
+            .lock()
+            .unwrap()
+            .push(("start", std::thread::current().id()));
+        true
+    }
+
+    unsafe extern "C" fn fake_stop(_: *const clap_plugin) {
+        CALLS
+            .lock()
+            .unwrap()
+            .push(("stop", std::thread::current().id()));
+    }
+
+    unsafe extern "C" fn fake_process(_: *const clap_plugin, _: *const clap_process) -> i32 {
+        CALLS
+            .lock()
+            .unwrap()
+            .push(("process", std::thread::current().id()));
+        0
+    }
+
+    /// Minimal vtable: no extensions (engine falls back to one stereo out
+    /// port), but start/stop/process record their calling thread.
+    fn fake_plugin() -> clap_plugin {
+        clap_plugin {
+            desc: ptr::null(),
+            plugin_data: ptr::null_mut(),
+            init: None,
+            destroy: None,
+            activate: None,
+            deactivate: None,
+            start_processing: Some(fake_start),
+            stop_processing: Some(fake_stop),
+            reset: None,
+            process: Some(fake_process),
+            get_extension: None,
+            on_main_thread: None,
+        }
+    }
+
+    /// The CLAP spec requires start/stop_processing on the audio thread —
+    /// i.e. on the thread that runs `process` (here: this test thread, which
+    /// `mark_audio_thread` registered as the audio thread).
+    #[test]
+    fn start_and_stop_processing_run_on_the_process_thread() {
+        let plugin = fake_plugin();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let mut engine = Engine::new(
+            &raw const plugin,
+            2,
+            None,
+            crate::events::queue(),
+            crate::events::queue(),
+            Arc::clone(&stop),
+            Arc::clone(&stopped),
+        );
+        let here = std::thread::current().id();
+        let mut data = vec![0.0_f32; 512];
+
+        engine.process(&mut data);
+        engine.process(&mut data);
+        {
+            let calls = CALLS.lock().unwrap();
+            let on_this = |(n, t): &(&str, ThreadId)| *n == "process" && *t == here;
+            assert!(calls.iter().any(on_this), "process ran: {calls:?}");
+            assert_eq!(
+                calls.iter().filter(|(n, _)| *n == "start").count(),
+                1,
+                "start_processing exactly once: {calls:?}"
+            );
+            assert!(
+                calls
+                    .iter()
+                    .filter(|(n, _)| *n == "start")
+                    .all(|(_, t)| *t == here),
+                "start_processing on the process thread: {calls:?}"
+            );
+        }
+
+        stop.store(true, Ordering::Release);
+        engine.process(&mut data);
+        let calls = CALLS.lock().unwrap();
+        assert_eq!(
+            calls.iter().filter(|(n, _)| *n == "stop").count(),
+            1,
+            "stop_processing exactly once: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .filter(|(n, _)| *n == "stop")
+                .all(|(_, t)| *t == here),
+            "stop_processing on the process thread: {calls:?}"
+        );
+        assert!(stopped.load(Ordering::Acquire));
+    }
 }
