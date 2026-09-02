@@ -5,8 +5,9 @@
 //! Usage:
 //!   clap-host-rs --plugin <path.clap> [--id <clap-id>] [--list-params]
 //!                [--list-presets] [--pull-preset <key> --out <file>]
-//!                [--set <id>=<val>]... [--play [--output-device <name>]]
-//!                [--list-midi] [--midi-in <name>] | --scan
+//!                [--set <id>=<val>]... [--play [--output-device <name>]
+//!                [--input-device <name>]] [--list-midi] [--midi-in <name>] |
+//!                --scan | --list-devices
 
 #![allow(clippy::missing_safety_doc)]
 
@@ -31,13 +32,17 @@ fn main() {
         print_midi_ports();
     }
 
+    if args.list_devices {
+        print_devices();
+    }
+
     if args.scan {
         print_scan();
     }
 
     let Some(path) = args.plugin_path.clone() else {
-        // --scan and --list-midi alone are valid standalone queries.
-        let standalone = (args.scan || args.list_midi)
+        // --scan, --list-midi and --list-devices alone are valid standalone queries.
+        let standalone = (args.scan || args.list_midi || args.list_devices)
             && !args.play
             && !args.list_params
             && !args.list_presets
@@ -124,7 +129,13 @@ fn main() {
         let _conn = midi::open(args.midi_in.as_deref(), &midi_q)
             .inspect_err(|e| eprintln!("warn: {e} — running without MIDI"))
             .ok();
-        run_play(plugin, midi_q, events::queue(), args.output_device.as_deref());
+        run_play(
+            plugin,
+            midi_q,
+            events::queue(),
+            args.output_device.as_deref(),
+            args.input_device.as_deref(),
+        );
         // run_play loops forever; if it returns, fall through to destroy.
     }
 
@@ -182,6 +193,21 @@ fn print_midi_ports() {
     }
 }
 
+/// CLI `--list-devices`: audio output, audio input and MIDI ports.
+fn print_devices() {
+    let outs = audio::output_devices();
+    println!("{} audio output device(s):", outs.len());
+    for (i, name) in outs.iter().enumerate() {
+        println!("  [{i}] {name}");
+    }
+    let ins = audio::input_devices();
+    println!("{} audio input device(s):", ins.len());
+    for (i, name) in ins.iter().enumerate() {
+        println!("  [{i}] {name}");
+    }
+    print_midi_ports();
+}
+
 /// CLI `--scan`: walk the OS standard CLAP dirs and list every plugin.
 /// A broken .clap is a warning; the scan keeps going.
 fn print_scan() {
@@ -220,8 +246,9 @@ fn run_play(
     midi_rx: Queue<RawMidi>,
     ui_rx: Queue<UiEvent>,
     device_name: Option<&str>,
+    input_name: Option<&str>,
 ) {
-    let session = audio::open(plugin, device_name, midi_rx, ui_rx).unwrap_or_else(|e| {
+    let session = audio::open(plugin, device_name, input_name, midi_rx, ui_rx).unwrap_or_else(|e| {
         eprintln!("error: {e}");
         std::process::exit(1);
     });

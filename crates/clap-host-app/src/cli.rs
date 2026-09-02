@@ -5,7 +5,8 @@ use std::path::PathBuf;
 pub const USAGE: &str = "usage: clap-host-rs [--scan | --plugin <path.clap> [--id <clap-id>] \
                          [--list-params] [--list-presets] \
                          [--pull-preset <key> --out <file>] [--set <id>=<val>]... \
-                         [--play [--output-device <name>]] [--list-midi] [--midi-in <name>]]";
+                         [--play [--output-device <name>] [--input-device <name>]] \
+                         [--list-midi] [--midi-in <name>]] [--list-devices]";
 
 // A CLI flag struct is exactly the case this lint doesn't help — each bool
 // is an independent switch, not related state that wants an enum.
@@ -17,6 +18,8 @@ pub struct Args {
     pub scan: bool,
     pub play: bool,
     pub output_device: Option<String>,
+    pub input_device: Option<String>,
+    pub list_devices: bool,
     pub list_params: bool,
     pub list_presets: bool,
     pub pull_preset: Option<String>,
@@ -49,6 +52,10 @@ pub fn parse_args() -> Args {
                 i += 1;
                 a.output_device = argv.get(i).cloned();
             }
+            "--input-device" => {
+                i += 1;
+                a.input_device = argv.get(i).cloned();
+            }
             "--midi-in" => {
                 i += 1;
                 a.midi_in = argv.get(i).cloned();
@@ -77,6 +84,7 @@ pub fn parse_args() -> Args {
             "--scan" => a.scan = true,
             "--list-presets" => a.list_presets = true,
             "--play" => a.play = true,
+            "--list-devices" => a.list_devices = true,
             "--list-midi" => a.list_midi = true,
             arg => eprintln!("warn: unknown arg {arg}"),
         }

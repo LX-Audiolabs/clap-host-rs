@@ -230,6 +230,15 @@ pub fn output_devices() -> Vec<String> {
     devices.map(|d| device_label(&d)).collect()
 }
 
+/// Names of the available input devices.
+#[must_use]
+pub fn input_devices() -> Vec<String> {
+    let Ok(devices) = cpal::default_host().input_devices() else {
+        return Vec::new();
+    };
+    devices.map(|d| device_label(&d)).collect()
+}
+
 /// A running stream plus the plugin activation that belongs to it. Dropping it
 /// stops processing and deactivates, so switching devices is drop + `open`.
 pub struct Session {
@@ -258,10 +267,12 @@ impl Drop for Session {
 }
 
 /// Activate the plugin at the device's rate and start streaming. `device_name`
-/// of `None` picks the default output device.
+/// of `None` picks the default output device; `input_name` of `None` picks the
+/// default input device.
 pub fn open(
     plugin: *const clap_plugin,
     device_name: Option<&str>,
+    input_name: Option<&str>,
     midi_rx: Queue<RawMidi>,
     ui_rx: Queue<UiEvent>,
 ) -> Result<Session, String> {
@@ -297,7 +308,7 @@ pub fn open(
         .iter()
         .sum::<u32>() as usize;
     let (capture_buf, in_stream) = if in_ch_count > 0 {
-        match open_input(config.sample_rate(), in_ch_count) {
+        match open_input(config.sample_rate(), in_ch_count, input_name) {
             Ok((buf, stream)) => (Some(buf), Some(stream)),
             Err(e) => {
                 eprintln!("warn: audio input: {e} — plugin inputs will be silence");
@@ -353,16 +364,25 @@ pub fn open(
     })
 }
 
-/// Try to open the default input device at `rate`, remixed to `plugin_in_ch` channels.
+/// Try to open an input device at `rate`, remixed to `plugin_in_ch` channels.
+/// `want` of `None` picks the default input device.
 /// Non-fatal: caller warns and falls back to silence on any error.
 fn open_input(
     rate: cpal::SampleRate,
     plugin_in_ch: usize,
+    want: Option<&str>,
 ) -> Result<(Arc<ArrayQueue<f32>>, cpal::Stream), String> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or("no default input device")?;
+    let dev = match want {
+        Some(name) => host
+            .input_devices()
+            .map_err(|e| e.to_string())?
+            .find(|d| device_label(d) == name),
+        None => host.default_input_device(),
+    };
+    let Some(device) = dev else {
+        return Err(format!("input device '{want:?}' not found"));
+    };
     let cfg = device
         .default_input_config()
         .map_err(|e| format!("input config: {e}"))?;
