@@ -184,6 +184,27 @@ unsafe extern "C" fn ev_drop(_: *const clap_output_events, _: *const clap_event_
     true
 }
 
+/// Empty input event list for host→plugin calls like `params.flush`.
+#[must_use]
+pub fn empty_input_events() -> clap_input_events {
+    clap_input_events {
+        ctx: ptr::null_mut(),
+        size: Some(empty_size),
+        get: Some(empty_get),
+    }
+}
+
+unsafe extern "C" fn empty_size(_: *const clap_input_events) -> u32 {
+    0
+}
+
+unsafe extern "C" fn empty_get(
+    _: *const clap_input_events,
+    _: u32,
+) -> *const clap_event_header {
+    ptr::null()
+}
+
 /// Output event list that discards everything the plugin emits.
 #[must_use]
 pub fn sink_output_events() -> clap_output_events {

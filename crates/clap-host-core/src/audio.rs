@@ -158,6 +158,11 @@ impl Engine {
     }
 
     fn process_block(&mut self, frames: usize) {
+        // The plugin asked (maybe from its GUI thread) for a params flush;
+        // the spec wants it on the audio thread, so it happens here.
+        if crate::host::take_params_flush_requested() {
+            loader::flush_params(self.plugin.0);
+        }
         // Deinterleave captured input into plugin input port buffers.
         // Each frame contributes one sample per input channel in the ring buffer.
         if self.main_out_offset > 0 {

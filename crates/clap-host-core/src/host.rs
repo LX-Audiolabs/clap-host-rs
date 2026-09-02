@@ -6,28 +6,40 @@
 use clap_sys::{
     ext::{
         gui::{CLAP_EXT_GUI, clap_host_gui},
+        latency::{CLAP_EXT_LATENCY, clap_host_latency},
         log::{
             CLAP_EXT_LOG, CLAP_LOG_ERROR, CLAP_LOG_FATAL, CLAP_LOG_HOST_MISBEHAVING, CLAP_LOG_INFO,
             CLAP_LOG_PLUGIN_MISBEHAVING, CLAP_LOG_WARNING, clap_host_log, clap_log_severity,
         },
+        note_name::{CLAP_EXT_NOTE_NAME, clap_host_note_name},
         params::{
             CLAP_EXT_PARAMS, clap_host_params, clap_param_clear_flags, clap_param_rescan_flags,
         },
+        state::{CLAP_EXT_STATE, clap_host_state},
+        tail::{CLAP_EXT_TAIL, clap_host_tail},
         thread_check::{CLAP_EXT_THREAD_CHECK, clap_host_thread_check},
+        timer_support::{
+            CLAP_EXT_TIMER_SUPPORT, clap_host_timer_support, clap_plugin_timer_support,
+        },
     },
     host::clap_host,
     id::clap_id,
     plugin::clap_plugin,
     version::CLAP_VERSION,
 };
+use crossbeam_queue::ArrayQueue;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
+use std::sync::LazyLock;
+use std::sync::Mutex;
+use std::sync::Once;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread::ThreadId;
+use std::time::{Duration, Instant};
 
-// ---------------------------------------------------------------------------
-// Host extensions — log + thread_check (params/gui land in Phase 2)
+// Host extensions — log + thread_check + gui + params + state + timer +
+// latency + tail + note-name.
 // ---------------------------------------------------------------------------
 
 static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
@@ -74,6 +86,18 @@ static CALLBACK_REQUESTED: AtomicBool = AtomicBool::new(false);
 static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Set by the plugin's `gui.closed` callback — the window is gone.
 static GUI_CLOSED: AtomicBool = AtomicBool::new(false);
+/// Set by `params.rescan`/`params.clear`; the UI re-reads its param list.
+static PARAMS_DIRTY: AtomicBool = AtomicBool::new(false);
+/// Set by `params.request_flush`; drained on the audio thread by the engine.
+static PARAMS_FLUSH_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Set by `state.mark_dirty` — the plugin's state changed since last save.
+static STATE_DIRTY: AtomicBool = AtomicBool::new(false);
+/// Set by `latency.changed`; re-query `clap_plugin_latency.get`.
+static LATENCY_CHANGED: AtomicBool = AtomicBool::new(false);
+/// Set by `tail.changed`; re-query `clap_plugin_tail.get`.
+static TAIL_CHANGED: AtomicBool = AtomicBool::new(false);
+/// Set by `note_name.changed`; re-query the plugin's note names.
+static NOTE_NAME_CHANGED: AtomicBool = AtomicBool::new(false);
 
 /// Run the plugin's pending main-thread work. Call from the UI event loop.
 pub fn pump_main_thread(plugin: *const clap_plugin) {
@@ -82,6 +106,39 @@ pub fn pump_main_thread(plugin: *const clap_plugin) {
     {
         unsafe { cb(plugin) };
     }
+    // Fire due timers here, on the main thread — never in the timer thread.
+    fire_due_timers(plugin);
+}
+
+/// True once per `params.rescan`/`params.clear` from the plugin.
+pub fn take_params_dirty() -> bool {
+    PARAMS_DIRTY.swap(false, Ordering::AcqRel)
+}
+
+/// True once per `params.request_flush`; the engine drains this on the audio
+/// thread and calls `clap_plugin_params.flush` there (as the spec requires).
+pub fn take_params_flush_requested() -> bool {
+    PARAMS_FLUSH_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+/// True once per `state.mark_dirty` from the plugin.
+pub fn take_state_dirty() -> bool {
+    STATE_DIRTY.swap(false, Ordering::AcqRel)
+}
+
+/// True once per `latency.changed` from the plugin.
+pub fn take_latency_changed() -> bool {
+    LATENCY_CHANGED.swap(false, Ordering::AcqRel)
+}
+
+/// True once per `tail.changed` from the plugin.
+pub fn take_tail_changed() -> bool {
+    TAIL_CHANGED.swap(false, Ordering::AcqRel)
+}
+
+/// True once per `note_name.changed` from the plugin.
+pub fn take_note_name_changed() -> bool {
+    NOTE_NAME_CHANGED.swap(false, Ordering::AcqRel)
 }
 
 /// True once per `request_restart` from the plugin.
@@ -109,10 +166,134 @@ unsafe extern "C" fn host_gui_closed(_: *const clap_host, _was_destroyed: bool) 
     GUI_CLOSED.store(true, Ordering::Release);
 }
 
-unsafe extern "C" fn host_params_rescan(_: *const clap_host, _: clap_param_rescan_flags) {}
-unsafe extern "C" fn host_params_clear(_: *const clap_host, _: clap_id, _: clap_param_clear_flags) {
+unsafe extern "C" fn host_params_rescan(_: *const clap_host, _: clap_param_rescan_flags) {
+    PARAMS_DIRTY.store(true, Ordering::Release);
 }
-unsafe extern "C" fn host_params_request_flush(_: *const clap_host) {}
+unsafe extern "C" fn host_params_clear(_: *const clap_host, _: clap_id, _: clap_param_clear_flags) {
+    PARAMS_DIRTY.store(true, Ordering::Release);
+}
+unsafe extern "C" fn host_params_request_flush(_: *const clap_host) {
+    PARAMS_FLUSH_REQUESTED.store(true, Ordering::Release);
+}
+
+unsafe extern "C" fn host_state_mark_dirty(_: *const clap_host) {
+    STATE_DIRTY.store(true, Ordering::Release);
+}
+
+unsafe extern "C" fn host_latency_changed(_: *const clap_host) {
+    LATENCY_CHANGED.store(true, Ordering::Release);
+}
+
+unsafe extern "C" fn host_tail_changed(_: *const clap_host) {
+    TAIL_CHANGED.store(true, Ordering::Release);
+}
+
+unsafe extern "C" fn host_note_name_changed(_: *const clap_host) {
+    NOTE_NAME_CHANGED.store(true, Ordering::Release);
+}
+
+// ---------------------------------------------------------------------------
+// Timers — one background thread ticks every 5 ms and queues due ids;
+// `pump_main_thread` (main thread) delivers them via `timer_support.on_timer`.
+// ---------------------------------------------------------------------------
+
+static TIMERS: Mutex<Vec<(clap_id, u32, Instant)>> = Mutex::new(Vec::new());
+static TIMER_DUE: LazyLock<ArrayQueue<clap_id>> = LazyLock::new(|| ArrayQueue::new(256));
+static NEXT_TIMER_ID: AtomicU32 = AtomicU32::new(1);
+static TIMER_THREAD: Once = Once::new();
+
+const TIMER_TICK: Duration = Duration::from_millis(5);
+
+fn spawn_timer_thread() {
+    TIMER_THREAD.call_once(|| {
+        std::thread::spawn(|| loop {
+            std::thread::sleep(TIMER_TICK);
+            let now = Instant::now();
+            let Ok(mut timers) = TIMERS.lock() else {
+                continue;
+            };
+            for (id, period_ms, last) in timers.iter_mut() {
+                if now.duration_since(*last) >= Duration::from_millis(u64::from(*period_ms)) {
+                    *last = now;
+                    // Full queue means the main thread is stuck; drop, don't block.
+                    let _ = TIMER_DUE.push(*id);
+                }
+            }
+        });
+    });
+}
+
+/// Register a timer ticking every `period_ms`; returns its id, or `None` if
+/// `period_ms` is 0. Ids start at 1.
+pub fn request_timer(period_ms: u32) -> Option<clap_id> {
+    if period_ms == 0 {
+        return None;
+    }
+    let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut timers) = TIMERS.lock() {
+        timers.push((id, period_ms, Instant::now()));
+    }
+    Some(id)
+}
+
+/// Remove a timer. Returns false if the id was not registered.
+pub fn cancel_timer(timer_id: clap_id) -> bool {
+    let Ok(mut timers) = TIMERS.lock() else {
+        return false;
+    };
+    let before = timers.len();
+    timers.retain(|(id, _, _)| *id != timer_id);
+    timers.len() != before
+}
+
+/// True if `timer_id` is still registered (stale due-ids are dropped).
+fn timer_registered(timer_id: clap_id) -> bool {
+    TIMERS
+        .lock()
+        .is_ok_and(|timers| timers.iter().any(|(id, _, _)| *id == timer_id))
+}
+
+fn fire_due_timers(plugin: *const clap_plugin) {
+    if TIMER_DUE.is_empty() {
+        return;
+    }
+    let Some(raw) = crate::loader::plugin_ext(plugin, CLAP_EXT_TIMER_SUPPORT) else {
+        // Plugin can't take timers; drain the queue so it doesn't grow.
+        while TIMER_DUE.pop().is_some() {}
+        return;
+    };
+    let timers = unsafe { &*raw.cast::<clap_plugin_timer_support>() };
+    let Some(on_timer) = timers.on_timer else {
+        while TIMER_DUE.pop().is_some() {}
+        return;
+    };
+    while let Some(id) = TIMER_DUE.pop() {
+        if timer_registered(id) {
+            unsafe { on_timer(plugin, id) };
+        }
+    }
+}
+
+unsafe extern "C" fn host_timer_register(
+    _: *const clap_host,
+    period_ms: u32,
+    timer_id: *mut clap_id,
+) -> bool {
+    if timer_id.is_null() {
+        return false;
+    }
+    match request_timer(period_ms) {
+        Some(id) => {
+            unsafe { *timer_id = id };
+            true
+        }
+        None => false,
+    }
+}
+
+unsafe extern "C" fn host_timer_unregister(_: *const clap_host, timer_id: clap_id) -> bool {
+    cancel_timer(timer_id)
+}
 
 static LOG_EXT: clap_host_log = clap_host_log {
     log: Some(host_log),
@@ -124,12 +305,26 @@ static GUI_EXT: clap_host_gui = clap_host_gui {
     request_hide: Some(host_gui_request_hide),
     closed: Some(host_gui_closed),
 };
-// The UI polls `params.get_value` instead of tracking output events, so these
-// are accept-and-ignore. Plugins still expect the extension to exist.
 static PARAMS_EXT: clap_host_params = clap_host_params {
     rescan: Some(host_params_rescan),
     clear: Some(host_params_clear),
     request_flush: Some(host_params_request_flush),
+};
+static STATE_EXT: clap_host_state = clap_host_state {
+    mark_dirty: Some(host_state_mark_dirty),
+};
+static TIMER_EXT: clap_host_timer_support = clap_host_timer_support {
+    register_timer: Some(host_timer_register),
+    unregister_timer: Some(host_timer_unregister),
+};
+static LATENCY_EXT: clap_host_latency = clap_host_latency {
+    changed: Some(host_latency_changed),
+};
+static TAIL_EXT: clap_host_tail = clap_host_tail {
+    changed: Some(host_tail_changed),
+};
+static NOTE_NAME_EXT: clap_host_note_name = clap_host_note_name {
+    changed: Some(host_note_name_changed),
 };
 static THREAD_CHECK_EXT: clap_host_thread_check = clap_host_thread_check {
     is_main_thread: Some(host_is_main_thread),
@@ -153,6 +348,21 @@ unsafe extern "C" fn host_get_extension(_: *const clap_host, id: *const c_char) 
     if id == CLAP_EXT_PARAMS {
         return ptr::from_ref(&PARAMS_EXT).cast();
     }
+    if id == CLAP_EXT_STATE {
+        return ptr::from_ref(&STATE_EXT).cast();
+    }
+    if id == CLAP_EXT_TIMER_SUPPORT {
+        return ptr::from_ref(&TIMER_EXT).cast();
+    }
+    if id == CLAP_EXT_LATENCY {
+        return ptr::from_ref(&LATENCY_EXT).cast();
+    }
+    if id == CLAP_EXT_TAIL {
+        return ptr::from_ref(&TAIL_EXT).cast();
+    }
+    if id == CLAP_EXT_NOTE_NAME {
+        return ptr::from_ref(&NOTE_NAME_EXT).cast();
+    }
     ptr::null()
 }
 unsafe extern "C" fn host_request_restart(_: *const clap_host) {
@@ -172,6 +382,7 @@ pub fn make_host() -> &'static clap_host {
         version: CString,
     }
     let _ = MAIN_THREAD.set(std::thread::current().id());
+    spawn_timer_thread();
     let s = Box::leak(Box::new(Strings {
         name: CString::new("CLAP-Host-RS").unwrap(),
         vendor: CString::new("lxndrbe").unwrap(),
@@ -190,4 +401,109 @@ pub fn make_host() -> &'static clap_host {
         request_process: Some(host_request_process),
         request_callback: Some(host_request_callback),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static TIMER_FIRES: AtomicU32 = AtomicU32::new(0);
+    static OFF_THREAD_FIRES: AtomicU32 = AtomicU32::new(0);
+    static PUMP_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
+
+    static PLUGIN_TIMER: clap_plugin_timer_support = clap_plugin_timer_support {
+        on_timer: Some(fake_on_timer),
+    };
+
+    unsafe extern "C" fn fake_on_timer(_: *const clap_plugin, _: clap_id) {
+        TIMER_FIRES.fetch_add(1, Ordering::Relaxed);
+        // on_timer must run on the thread that called pump_main_thread.
+        let caller = PUMP_THREAD.lock().ok().and_then(|g| *g);
+        if caller.is_some_and(|t| t != std::thread::current().id()) {
+            OFF_THREAD_FIRES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    unsafe extern "C" fn fake_get_extension(_: *const clap_plugin, id: *const c_char) -> *const c_void {
+        if !id.is_null() && unsafe { CStr::from_ptr(id) } == CLAP_EXT_TIMER_SUPPORT {
+            ptr::from_ref(&PLUGIN_TIMER).cast()
+        } else {
+            ptr::null()
+        }
+    }
+
+    #[test]
+    fn dirty_and_changed_flags_are_one_shot() {
+        unsafe { host_params_rescan(ptr::null(), 0) };
+        assert!(take_params_dirty());
+        assert!(!take_params_dirty());
+
+        unsafe { host_params_request_flush(ptr::null()) };
+        assert!(take_params_flush_requested());
+        assert!(!take_params_flush_requested());
+
+        unsafe { host_state_mark_dirty(ptr::null()) };
+        assert!(take_state_dirty());
+        assert!(!take_state_dirty());
+
+        unsafe { host_latency_changed(ptr::null()) };
+        assert!(take_latency_changed());
+        assert!(!take_latency_changed());
+
+        unsafe { host_tail_changed(ptr::null()) };
+        assert!(take_tail_changed());
+        assert!(!take_tail_changed());
+
+        unsafe { host_note_name_changed(ptr::null()) };
+        assert!(take_note_name_changed());
+        assert!(!take_note_name_changed());
+    }
+
+    #[test]
+    fn timer_registers_ticks_and_fires_on_main_thread() {
+        make_host(); // records this thread as main + spawns the tick thread
+        let plugin = clap_plugin {
+            get_extension: Some(fake_get_extension),
+            on_main_thread: None,
+            ..unsafe { std::mem::zeroed() }
+        };
+
+        let id = request_timer(5).expect("period 5 is valid");
+        assert!(!cancel_timer(id + 1_000_000));
+        if let Ok(mut slot) = PUMP_THREAD.lock() {
+            *slot = Some(std::thread::current().id());
+        }
+        std::thread::sleep(Duration::from_millis(60));
+        pump_main_thread(&plugin);
+
+        assert!(
+            TIMER_FIRES.load(Ordering::Relaxed) > 0,
+            "due timer ids should be delivered via on_timer"
+        );
+        assert_eq!(OFF_THREAD_FIRES.load(Ordering::Relaxed), 0);
+        assert!(cancel_timer(id));
+        while TIMER_DUE.pop().is_some() {}
+    }
+
+    #[test]
+    fn host_get_extension_serves_every_extension() {
+        make_host();
+        let host = make_host();
+        let get = host.get_extension.unwrap();
+        for id in [
+            CLAP_EXT_LOG,
+            CLAP_EXT_THREAD_CHECK,
+            CLAP_EXT_GUI,
+            CLAP_EXT_PARAMS,
+            CLAP_EXT_STATE,
+            CLAP_EXT_TIMER_SUPPORT,
+            CLAP_EXT_LATENCY,
+            CLAP_EXT_TAIL,
+            CLAP_EXT_NOTE_NAME,
+        ] {
+            assert!(!unsafe { get(host, id.as_ptr()) }.is_null(), "missing {id:?}");
+        }
+        let unknown = c"clap.definitely-not-real";
+        assert!(unsafe { get(host, unknown.as_ptr()) }.is_null());
+    }
 }
