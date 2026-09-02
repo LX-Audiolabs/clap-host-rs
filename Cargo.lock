@@ -830,6 +830,7 @@ name = "clap-host-app"
 version = "0.1.0"
 dependencies = [
  "clap-host-core",
+ "midir",
  "slint",
  "slint-build",
 ]

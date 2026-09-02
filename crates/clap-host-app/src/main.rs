@@ -7,11 +7,12 @@
 //!                [--list-presets] [--pull-preset <key> --out <file>]
 //!                [--set <id>=<val>]... [--play [--output-device <name>]
 //!                [--input-device <name>]] [--list-midi] [--midi-in <name>] |
-//!                --scan | --list-devices
+//!                --gui | --scan | --list-devices
 
 #![allow(clippy::missing_safety_doc)]
 
 mod cli;
+mod gui;
 
 use std::ffi::CStr;
 
@@ -44,6 +45,7 @@ fn main() {
         // --scan, --list-midi and --list-devices alone are valid standalone queries.
         let standalone = (args.scan || args.list_midi || args.list_devices)
             && !args.play
+            && !args.gui
             && !args.list_params
             && !args.list_presets
             && args.pull_preset.is_none()
@@ -78,6 +80,7 @@ fn main() {
 
     let needs_instance = args.list_params
         || args.play
+        || args.gui
         || !args.sets.is_empty()
         || args.pull_preset.is_some();
     if !needs_instance {
@@ -121,6 +124,20 @@ fn main() {
 
     if args.list_params {
         print_params(plugin);
+    }
+
+    if args.gui {
+        let (name, id) = unsafe { plugin_name_id(plugin) };
+        if let Err(e) = gui::run(
+            plugin,
+            &name,
+            &id,
+            args.midi_in.as_deref(),
+            args.input_device.as_deref(),
+        ) {
+            eprintln!("error: gui: {e}");
+        }
+        // gui::run returns when the window closes; fall through to destroy.
     }
 
     if args.play {
@@ -236,6 +253,20 @@ fn print_scan() {
                 println!("{p}: {name}  id={id}");
             }
         }
+    }
+}
+
+/// The created plugin's display name and id, for the GUI header.
+///
+/// # Safety
+/// `plugin` must be a live plugin instance returned by `Loader::create`.
+unsafe fn plugin_name_id(plugin: *const clap_plugin) -> (String, String) {
+    let d = unsafe { (*plugin).desc };
+    unsafe {
+        (
+            CStr::from_ptr((*d).name).to_string_lossy().into_owned(),
+            CStr::from_ptr((*d).id).to_string_lossy().into_owned(),
+        )
     }
 }
 
