@@ -12,16 +12,20 @@
 #![allow(clippy::too_many_lines)]
 
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
 use clap_host_core::audio::{self, Session};
 use clap_host_core::clap_sys::plugin::clap_plugin;
 use clap_host_core::events::{self, Queue, RawMidi, UiEvent};
-use clap_host_core::host::{pump_main_thread, take_gui_closed, take_restart_request};
+use clap_host_core::host::{
+    pump_main_thread, take_gui_closed, take_restart_request, take_state_dirty,
+};
 use clap_host_core::loader::{self, ParamInfo, PluginPtr};
 use clap_host_core::midi;
 use clap_host_core::plugin_gui::{FloatingGui, supports_floating};
+use clap_host_core::state;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
@@ -42,6 +46,8 @@ struct Host {
     midi_conn: Option<midir::MidiInputConnection<()>>,
     /// `params()` is asked once; only values are polled after that.
     params: Vec<ParamInfo>,
+    /// Fixed state path: the plugin file with a `.state.bin` suffix.
+    state_path: PathBuf,
 }
 
 impl Host {
@@ -74,8 +80,12 @@ pub fn run(
     id: &str,
     midi_in: Option<&str>,
     input_name: Option<&str>,
+    plugin_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ui = HostWindow::new()?;
+
+    let mut state_path = plugin_path.to_path_buf();
+    state_path.as_mut_os_string().push(".state.bin");
 
     let host = Rc::new(RefCell::new(Host {
         plugin: PluginPtr(plugin),
@@ -86,6 +96,7 @@ pub fn run(
         gui: None,
         midi_conn: None,
         params: loader::params(plugin),
+        state_path,
     }));
 
     ui.set_plugin_name(SharedString::from(name));
@@ -213,6 +224,47 @@ pub fn run(
         });
     }
 
+    {
+        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
+        ui.on_save_state(move || {
+            let Some(ui) = ui_w.upgrade() else { return };
+            let h = host.borrow();
+            match state::save(h.plugin(), &h.state_path) {
+                Ok(()) => {
+                    // Drain a mark_dirty that raced the save, then clear the dot.
+                    let _ = take_state_dirty();
+                    ui.set_state_dirty(false);
+                    ui.set_log_text(SharedString::from(format!(
+                        "state saved to {}",
+                        h.state_path.display()
+                    )));
+                }
+                Err(e) => ui.set_log_text(SharedString::from(format!("save state: {e}"))),
+            }
+        });
+    }
+    {
+        let (host, ui_w, params_model) = (Rc::clone(&host), ui.as_weak(), Rc::clone(&params_model));
+        ui.on_load_state(move || {
+            let Some(ui) = ui_w.upgrade() else { return };
+            let h = host.borrow();
+            match state::load(h.plugin(), &h.state_path) {
+                Ok(()) => {
+                    let _ = take_state_dirty();
+                    ui.set_state_dirty(false);
+                    ui.set_log_text(SharedString::from(format!(
+                        "state loaded from {}",
+                        h.state_path.display()
+                    )));
+                    drop(h);
+                    // load() changed the values; refresh the whole model at once.
+                    params_model.set_vec(param_rows(&host.borrow()));
+                }
+                Err(e) => ui.set_log_text(SharedString::from(format!("load state: {e}"))),
+            }
+        });
+    }
+
     // One timer drives everything the plugin expects from the main thread.
     let timer = slint::Timer::default();
     {
@@ -231,6 +283,9 @@ pub fn run(
                     .get_audio_devices()
                     .row_data(ui.get_audio_index().max(0) as usize);
                 start_audio(&ui, &host, name.as_deref());
+            }
+            if take_state_dirty() {
+                ui.set_state_dirty(true);
             }
 
             // ponytail: polling get_value instead of reading the plugin's output

@@ -16,6 +16,7 @@ mod cli;
 mod gui;
 
 use std::ffi::CStr;
+use std::path::Path;
 
 use clap_host_core::audio;
 use clap_host_core::events::{self, Queue, RawMidi, UiEvent};
@@ -154,6 +155,7 @@ fn main() {
             &id,
             args.midi_in.as_deref(),
             args.input_device.as_deref(),
+            Path::new(&path),
         ) {
             eprintln!("error: gui: {e}");
         }

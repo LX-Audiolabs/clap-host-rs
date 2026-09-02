@@ -39,8 +39,11 @@ export component HostWindow inherits Window {
     in-out property <int> midi-index: 0;
     in-out property <int> octave: 4;
     in-out property <string> log-text: "";
+    in property <bool> state-dirty: false;
 
     callback param-changed(int, float);
+    callback save-state();
+    callback load-state();
     callback audio-device-changed(int);
     callback audio-in-changed(int);
     callback midi-port-changed(int);
@@ -101,17 +104,35 @@ export component HostWindow inherits Window {
                     VerticalLayout {
                         horizontal-stretch: 1;
                         spacing: 2px;
-                        Text {
-                            text: root.plugin-name;
-                            color: HostTheme.primary;
-                            font-size: 20px;
-                            font-weight: 700;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: root.plugin-name;
+                                color: HostTheme.primary;
+                                font-size: 20px;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: "●";
+                                color: HostTheme.primary;
+                                font-size: 14px;
+                                visible: root.state-dirty;
+                                vertical-alignment: center;
+                            }
                         }
                         Text {
                             text: root.plugin-id;
                             color: HostTheme.on-surface-variant;
                             font-size: 12px;
                         }
+                    }
+                    Button {
+                        text: "Save State";
+                        clicked => { root.save-state(); }
+                    }
+                    Button {
+                        text: "Load State";
+                        clicked => { root.load-state(); }
                     }
                     Button {
                         text: root.gui-open ? "Close plugin GUI" : "Open plugin GUI";
