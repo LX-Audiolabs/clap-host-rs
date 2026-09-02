@@ -1,0 +1,51 @@
+// Horizontal parameter slider with label and value text.
+// Named ParamSlider to avoid conflict with Slint's std-widgets Slider.
+// Ported from the AURA reference widget, theme reference re-hosted.
+
+import { Slider } from "std-widgets.slint";
+import { HostTheme } from "theme.slint";
+
+export component ParamSlider inherits Rectangle {
+    in-out property <float> value: 0.5;
+    in property <string> label: "";
+    in property <string> value-text: "";
+    in property <float> minimum: 0.0;
+    in property <float> maximum: 1.0;
+
+    in property <color> label-color: HostTheme.on-surface-variant;
+    in property <color> value-color: HostTheme.on-surface;
+
+    callback changed(float);
+
+    height: 48px;
+    background: transparent;
+
+    VerticalLayout {
+        spacing: 4px;
+
+        Text {
+            text: root.label;
+            font-size: HostTheme.font-label;
+            color: root.label-color;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+
+            Slider {
+                minimum: root.minimum;
+                maximum: root.maximum;
+                value <=> root.value;
+                changed(v) => { root.changed(v); }
+            }
+
+            Text {
+                text: root.value-text != "" ? root.value-text : round(root.value * 100) / 100;
+                font-size: HostTheme.font-value;
+                color: root.value-color;
+                vertical-alignment: center;
+                width: 44px;
+            }
+        }
+    }
+}

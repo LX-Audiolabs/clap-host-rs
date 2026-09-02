@@ -1,0 +1,46 @@
+// Host identity tokens for CLAP-Host-RS widgets.
+//
+// Surfaces follow Material 3 dark structure (spacing / elevation).
+// Brand is aurora teal on ink — same palette as the AURA reference,
+// re-hosted under HostTheme so no `@aura` import is needed.
+//
+// Usage:
+//   import { HostTheme } from "theme.slint";
+//   background: HostTheme.surface;
+
+export global HostTheme {
+    // --- surfaces (ink) ---
+    out property <color> surface: #0c1014;
+    out property <color> surface-container-lowest: #07090c;
+    out property <color> surface-container-low: #14191e;
+    out property <color> surface-container: #1a2026;
+    out property <color> surface-container-high: #242b32;
+    out property <color> surface-container-highest: #2e363e;
+    out property <color> on-surface: #e6eef2;
+    out property <color> on-surface-variant: #a8b4bc;
+    out property <color> outline: #6d7a82;
+    out property <color> outline-variant: #3a444c;
+
+    // --- brand (aurora teal) ---
+    out property <color> primary: #5ee6c8;
+    out property <color> on-primary: #00382f;
+    out property <color> primary-container: #0e4f45;
+    out property <color> on-primary-container: #9ff5e0;
+
+    // --- secondary / error ---
+    out property <color> secondary: #bfc6dc;
+    out property <color> error: #ffb4ab;
+    out property <color> on-error: #690005;
+
+    // --- shape (M3-ish radii) ---
+    out property <length> radius-xs: 4px;
+    out property <length> radius-sm: 8px;
+    out property <length> radius-md: 12px;
+    out property <length> radius-lg: 16px;
+    out property <length> radius-full: 999px;
+
+    // --- type scale (compact for plugin panels) ---
+    out property <length> font-label: 11px;
+    out property <length> font-value: 12px;
+    out property <length> font-title: 16px;
+}
