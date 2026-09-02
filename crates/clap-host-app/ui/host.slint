@@ -31,14 +31,18 @@ export component HostWindow inherits Window {
     in property <bool> gui-open: false;
     in property <[ParamRow]> params: [];
     in property <[string]> audio-devices: [];
+    in property <[string]> audio-in-devices: [];
     in property <[string]> midi-ports: [];
+    in property <bool> has-audio-in: false;
     in-out property <int> audio-index: 0;
+    in-out property <int> audio-in-index: 0;
     in-out property <int> midi-index: 0;
     in-out property <int> octave: 4;
     in-out property <string> log-text: "";
 
     callback param-changed(int, float);
     callback audio-device-changed(int);
+    callback audio-in-changed(int);
     callback midi-port-changed(int);
     callback toggle-gui();
     callback note-on(int);
@@ -140,6 +144,19 @@ export component HostWindow inherits Window {
                             text: root.audio-status;
                             color: HostTheme.on-surface-variant;
                             font-size: 12px;
+                        }
+
+                        Text {
+                            text: "Audio input";
+                            color: HostTheme.on-surface-variant;
+                            font-size: HostTheme.font-label;
+                            visible: root.has-audio-in;
+                        }
+                        ComboBox {
+                            model: root.audio-in-devices;
+                            current-index <=> root.audio-in-index;
+                            visible: root.has-audio-in;
+                            selected => { root.audio-in-changed(root.audio-in-index); }
                         }
 
                         Text {

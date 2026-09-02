@@ -103,6 +103,21 @@ pub fn run(
             .collect::<Vec<_>>(),
     )));
 
+    let in_devices = audio::input_devices();
+    ui.set_audio_in_devices(ModelRc::new(VecModel::from(
+        in_devices.iter().map(SharedString::from).collect::<Vec<_>>(),
+    )));
+    // Only plugins with audio *input* ports consume a capture device.
+    ui.set_has_audio_in(!loader::audio_port_channels(plugin, true).is_empty());
+    if let Some(i) = host
+        .borrow()
+        .input_name
+        .as_deref()
+        .and_then(|n| in_devices.iter().position(|d| d == n))
+    {
+        ui.set_audio_in_index(i as i32);
+    }
+
     let params_model = Rc::new(VecModel::from(param_rows(&host.borrow())));
     ui.set_params(ModelRc::from(Rc::clone(&params_model)));
 
@@ -149,6 +164,19 @@ pub fn run(
             let Some(ui) = ui_w.upgrade() else { return };
             let name = ui.get_audio_devices().row_data(index as usize);
             start_audio(&ui, &host, name.as_deref());
+        });
+    }
+    {
+        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
+        ui.on_audio_in_changed(move |index| {
+            let Some(ui) = ui_w.upgrade() else { return };
+            let in_name = ui.get_audio_in_devices().row_data(index as usize);
+            host.borrow_mut().input_name = in_name.as_deref().map(str::to_owned);
+            // Keep the current output device; only the capture side switches.
+            let out_name = ui
+                .get_audio_devices()
+                .row_data(ui.get_audio_index().max(0) as usize);
+            start_audio(&ui, &host, out_name.as_deref());
         });
     }
     {
