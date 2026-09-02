@@ -1,0 +1,13 @@
+[package]
+name = "clap-host-app"
+publish = false
+
+[[bin]]
+name = "clap-host-rs"
+path = "src/main.rs"
+
+[dependencies]
+clap-host-core = { path = "../clap-host-core" }
+
+[build-dependencies]
+slint-build = "=1.17.1"

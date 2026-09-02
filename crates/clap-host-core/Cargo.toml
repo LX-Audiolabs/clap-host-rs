@@ -1,0 +1,11 @@
+[package]
+name = "clap-host-core"
+description = "Standalone CLAP host core: loading, audio, MIDI, presets, state, scan"
+publish = false
+
+[dependencies]
+clap-sys = "0.5"
+libloading = "0.9"
+cpal = "0.18.2"
+midir = "0.11"
+crossbeam-queue = "0.3"
