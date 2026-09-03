@@ -67,6 +67,8 @@ struct Host {
     midi_q: Queue<RawMidi>,
     ui_q: Queue<UiEvent>,
     session: Option<Session>,
+    /// Sample rate / buffer size overrides chosen in the Setup dialog.
+    settings: audio::StreamSettings,
     gui: Option<PluginWindow>,
     midi_conn: Option<midir::MidiInputConnection<()>>,
     /// `params()` is asked once; only values are polled after that.
@@ -147,6 +149,7 @@ pub fn run(
     midi_in: Option<&str>,
     input_name: Option<&str>,
     plugin_path: &Path,
+    settings: audio::StreamSettings,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ui = HostWindow::new()?;
     // Hidden until the Setup button shows it; lives as long as `ui`.
@@ -161,6 +164,7 @@ pub fn run(
         midi_q: events::queue(),
         ui_q: events::queue(),
         session: None,
+        settings,
         gui: None,
         midi_conn: None,
         params: loader::params(plugin),
@@ -247,6 +251,8 @@ pub fn run(
     setup.set_audio_index(ui.get_audio_index());
     setup.set_audio_in_index(ui.get_audio_in_index());
     setup.set_midi_index(ui.get_midi_index());
+    setup.set_sample_rate_options(ModelRc::new(VecModel::from(rate_options(None))));
+    setup.set_buffer_size_options(ModelRc::new(VecModel::from(buffer_options())));
 
     {
         let host = Rc::clone(&host);
@@ -539,6 +545,67 @@ fn wire_device_callbacks(ui: &HostWindow, setup: &SetupDialog, host: &Rc<RefCell
         let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
         setup.on_midi_port_changed(move |index| pick_midi_port(&ui_w, &setup_w, &host, index));
     }
+    // Stream settings live only in the Setup dialog; changing either restarts
+    // the session on the current output device.
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        setup.on_sample_rate_changed(move |index| {
+            let Some(setup) = setup_w.upgrade() else { return };
+            setup.set_sample_rate_index(index);
+            let label = setup
+                .get_sample_rate_options()
+                .row_data(index.max(0) as usize)
+                .unwrap_or_default();
+            // Row 0 is "Default" — anything else parses to a rate.
+            host.borrow_mut().settings.sample_rate = label.parse::<u32>().ok();
+            restart_audio(&ui_w, &host);
+        });
+    }
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        setup.on_buffer_size_changed(move |index| {
+            let Some(setup) = setup_w.upgrade() else { return };
+            setup.set_buffer_size_index(index);
+            let label = setup
+                .get_buffer_size_options()
+                .row_data(index.max(0) as usize)
+                .unwrap_or_default();
+            host.borrow_mut().settings.buffer_size = label.parse::<u32>().ok();
+            restart_audio(&ui_w, &host);
+        });
+    }
+}
+
+/// ComboBox model for the sample-rate picker: "Default" + what the device supports.
+fn rate_options(device: Option<&str>) -> Vec<SharedString> {
+    std::iter::once(SharedString::from("Default"))
+        .chain(
+            audio::sample_rates(device)
+                .iter()
+                .map(|r| SharedString::from(r.to_string())),
+        )
+        .collect()
+}
+
+/// ComboBox model for the buffer-size picker: "Default" + the fixed sizes we offer.
+fn buffer_options() -> Vec<SharedString> {
+    std::iter::once(SharedString::from("Default"))
+        .chain(
+            audio::BUFFER_SIZES
+                .iter()
+                .map(|b| SharedString::from(b.to_string())),
+        )
+        .collect()
+}
+
+/// Restart the audio session on the currently selected output device, after
+/// a settings change (sample rate, buffer size, input pick).
+fn restart_audio(ui_w: &slint::Weak<HostWindow>, host: &Rc<RefCell<Host>>) {
+    let Some(ui) = ui_w.upgrade() else { return };
+    let name = ui
+        .get_audio_devices()
+        .row_data(ui.get_audio_index().max(0) as usize);
+    start_audio(&ui, host, name.as_deref());
 }
 
 /// Output-device pick: restart audio on the chosen device. The device models
@@ -558,6 +625,17 @@ fn pick_output_device(
     // two-way binding already set it — but the dialog path needs this write.
     ui.set_audio_index(index);
     let name = ui.get_audio_devices().row_data(index as usize);
+    // Supported rates differ per device: rebuild the picker, keeping the
+    // current selection when the new device supports it.
+    let prev_rate = host.borrow().settings.sample_rate;
+    let opts = rate_options(name.as_deref());
+    let idx = prev_rate
+        .and_then(|r| opts.iter().position(|o| o.as_str() == r.to_string()))
+        .unwrap_or(0) as i32;
+    if let Some(setup) = setup_w.upgrade() {
+        setup.set_sample_rate_options(ModelRc::new(VecModel::from(opts)));
+        setup.set_sample_rate_index(idx);
+    }
     start_audio(&ui, host, name.as_deref());
 }
 
@@ -623,7 +701,14 @@ fn start_audio(ui: &HostWindow, host: &Rc<RefCell<Host>>, device: Option<&str>) 
         Queue::clone(&h.midi_q),
         Queue::clone(&h.ui_q),
     );
-    match audio::open(plugin, device, input_name.as_deref(), midi_q, ui_q) {
+    match audio::open(
+        plugin,
+        device,
+        input_name.as_deref(),
+        midi_q,
+        ui_q,
+        &h.settings,
+    ) {
         Ok(s) => {
             ui.set_audio_status(SharedString::from(format!(
                 "{} Hz · {} ch · ports in {:?} / out {:?} · notes {:?}",

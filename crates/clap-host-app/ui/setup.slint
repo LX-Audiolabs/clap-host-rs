@@ -14,14 +14,20 @@ export component SetupDialog inherits Window {
     in property <[string]> audio-devices: [];
     in property <[string]> audio-in-devices: [];
     in property <[string]> midi-ports: [];
+    in property <[string]> sample-rate-options: [];
+    in property <[string]> buffer-size-options: [];
     in property <bool> has-audio-in: false;
     in-out property <int> audio-index: 0;
     in-out property <int> audio-in-index: 0;
     in-out property <int> midi-index: 0;
+    in-out property <int> sample-rate-index: 0;
+    in-out property <int> buffer-size-index: 0;
 
     callback audio-device-changed(int);
     callback audio-in-changed(int);
     callback midi-port-changed(int);
+    callback sample-rate-changed(int);
+    callback buffer-size-changed(int);
 
     VerticalBox {
         padding: 16px;
@@ -35,6 +41,26 @@ export component SetupDialog inherits Window {
             model: root.audio-devices;
             current-index <=> root.audio-index;
             selected => { root.audio-device-changed(root.audio-index); }
+        }
+        Text {
+            text: "Sample rate";
+            color: HostTheme.on-surface-variant;
+            font-size: HostTheme.font-label;
+        }
+        ComboBox {
+            model: root.sample-rate-options;
+            current-index <=> root.sample-rate-index;
+            selected => { root.sample-rate-changed(root.sample-rate-index); }
+        }
+        Text {
+            text: "Buffer size";
+            color: HostTheme.on-surface-variant;
+            font-size: HostTheme.font-label;
+        }
+        ComboBox {
+            model: root.buffer-size-options;
+            current-index <=> root.buffer-size-index;
+            selected => { root.buffer-size-changed(root.buffer-size-index); }
         }
         Text {
             text: "Audio input";

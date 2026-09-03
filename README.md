@@ -17,6 +17,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 The binary is produced at `target/debug/clap-host-rs` (`--release` works too).
 
+### Optional: ASIO backend (Windows)
+
+The default Windows backend is WASAPI. ASIO support is behind the opt-in
+feature `asio` (cpal's ASIO host):
+
+```bash
+cargo build --workspace --features asio
+```
+
+Building it needs more than a normal build: the Steinberg ASIO SDK, pointed
+to by the `CPAL_ASIO_DIR` env var, plus LLVM/Clang for bindgen
+(`LIBCLANG_PATH`). See [cpal's README](https://github.com/RustAudio/cpal)
+("ASIO on Windows"). Without the SDK the default (WASAPI) build is
+unaffected.
+
 ## CLI
 
 ```
@@ -24,7 +39,8 @@ clap-host-rs [--scan | --plugin <path.clap> [--id <clap-id>]
              [--list-params] [--list-presets]
              [--pull-preset <key> --out <file>] [--set <id>=<val>]...
              [--load-state <file>] [--save-state <file>]
-             [--play | --gui [--output-device <name>] [--input-device <name>]]
+             [--play | --gui [--output-device <name>] [--input-device <name>]
+             [--sample-rate <hz>] [--buffer-size <frames>]]
              [--list-midi] [--midi-in <name>]] [--list-devices]
 ```
 
@@ -41,6 +57,9 @@ clap-host-rs [--scan | --plugin <path.clap> [--id <clap-id>]
 - `--play` — open the audio device and process until Ctrl+C. `--output-device`/
   `--input-device` pick non-default devices; the input feeds the plugin's
   audio input ports. `--midi-in <name>` selects a MIDI input port.
+  `--sample-rate <hz>` and `--buffer-size <frames>` override the
+  device/backend defaults (the buffer-size falls back to the backend default
+  if the backend rejects a fixed size).
 - `--gui` — open the Slint window instead of blocking on the console.
 
 `--scan`, `--list-midi` and `--list-devices` are valid standalone queries
@@ -48,11 +67,13 @@ without `--plugin`.
 
 ## GUI
 
-Slint window (`--gui`): a Setup dialog for audio/MIDI device selection, a
-scrollable parameter list with sliders, a computer-keyboard piano (focused
-window = playing), a toggle for the plugin's own window, and state
-save/load with a dirty indicator (the plugin's `state.mark_dirty` lights a
-dot; save/load use `<plugin-file>.state.bin` next to the plugin binary).
+Slint window (`--gui`): a Setup dialog for audio/MIDI device selection —
+output and audio-input devices, sample rate, buffer size, MIDI port, applied
+immediately on every change — plus a scrollable parameter list with sliders, a
+computer-keyboard piano (focused window = playing), a toggle for the plugin's
+own window, and state save/load with a dirty indicator (the plugin's
+`state.mark_dirty` lights a dot; save/load use `<plugin-file>.state.bin` next
+to the plugin binary).
 Plugins exposing `clap.remote-controls` get a paging panel (page name +
 prev/next buttons) whose sliders mirror the plugin's parameter pages.
 
@@ -94,3 +115,5 @@ Known gaps, roughly ordered by usefulness:
   CLI-only via `--list-presets`/`--pull-preset`).
 - Live `request_resize` handling for the embedded editor.
 - Editor embedding on macOS/Linux (currently Windows-only).
+- Channel routing: pick a channel pair on many-channel interfaces instead of
+  always using the first channels.

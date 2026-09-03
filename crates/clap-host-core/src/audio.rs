@@ -21,6 +21,16 @@ use crate::loader::{self, PluginPtr};
 /// Frames per `process()` call at most — also the `max_frames_count` we activate with.
 pub const MAX_FRAMES: usize = 4096;
 
+/// Stream options the user can override; `None` = device/backend default.
+#[derive(Clone, Debug, Default)]
+pub struct StreamSettings {
+    pub sample_rate: Option<u32>,
+    pub buffer_size: Option<u32>,
+}
+
+/// Buffer sizes (frames per callback) offered in the UI.
+pub const BUFFER_SIZES: [u32; 6] = [64, 128, 256, 512, 1024, 2048];
+
 /// Owns everything the audio thread touches. Buffers are allocated once; the
 /// callback never allocates.
 pub struct Engine {
@@ -296,6 +306,41 @@ pub fn input_devices() -> Vec<String> {
     devices.map(|d| device_label(&d)).collect()
 }
 
+/// Sample rates `device_name` (or the default output device) supports, the
+/// device's current default rate first. Common rates only; falls back to just
+/// the default when enumeration fails.
+#[must_use]
+pub fn sample_rates(device_name: Option<&str>) -> Vec<u32> {
+    const COMMON: [u32; 6] = [44100, 48000, 88200, 96000, 176400, 192000];
+    let host = cpal::default_host();
+    let device = match device_name {
+        Some(want) => host
+            .output_devices()
+            .ok()
+            .and_then(|mut devs| devs.find(|d| device_label(d) == want)),
+        None => host.default_output_device(),
+    };
+    let Some(device) = device else { return Vec::new() };
+    let Ok(default_cfg) = device.default_output_config() else {
+        return Vec::new();
+    };
+    let default_rate = default_cfg.sample_rate();
+    let ranges: Vec<(u32, u32)> = device
+        .supported_output_configs()
+        .map(|it| {
+            it.map(|c| (c.min_sample_rate(), c.max_sample_rate()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut rates: Vec<u32> = COMMON
+        .into_iter()
+        .filter(|r| ranges.iter().any(|(lo, hi)| lo <= r && r <= hi))
+        .collect();
+    rates.retain(|&r| r != default_rate);
+    rates.insert(0, default_rate);
+    rates
+}
+
 /// A running stream plus the plugin activation that belongs to it. Dropping it
 /// stops processing and deactivates, so switching devices is drop + `open`.
 pub struct Session {
@@ -342,13 +387,15 @@ impl Drop for Session {
 
 /// Activate the plugin at the device's rate and start streaming. `device_name`
 /// of `None` picks the default output device; `input_name` of `None` picks the
-/// default input device.
+/// default input device. `settings` overrides sample rate and buffer size;
+/// `None` fields use the device/backend defaults.
 pub fn open(
     plugin: *const clap_plugin,
     device_name: Option<&str>,
     input_name: Option<&str>,
     midi_rx: Queue<RawMidi>,
     ui_rx: Queue<UiEvent>,
+    settings: &StreamSettings,
 ) -> Result<Session, String> {
     let audio_host = cpal::default_host();
     let device = match device_name {
@@ -374,7 +421,19 @@ pub fn open(
     }
 
     // cpal 0.17+: SampleRate is a u32 alias (no .0 newtype).
-    let sample_rate = f64::from(config.sample_rate());
+    let sample_rate = settings.sample_rate.unwrap_or_else(|| config.sample_rate());
+    if settings.sample_rate.is_some() {
+        let supported = device
+            .supported_output_configs()
+            .map_err(|e| format!("output configs: {e}"))?
+            .any(|c| c.min_sample_rate() <= sample_rate && sample_rate <= c.max_sample_rate());
+        if !supported {
+            return Err(format!(
+                "sample rate {sample_rate} Hz not supported by {}",
+                device_label(&device)
+            ));
+        }
+    }
     let device_channels = config.channels() as usize;
 
     // Open a capture stream when the plugin declares audio input ports.
@@ -382,7 +441,7 @@ pub fn open(
         .iter()
         .sum::<u32>() as usize;
     let (capture_buf, in_stream) = if in_ch_count > 0 {
-        match open_input(config.sample_rate(), in_ch_count, input_name) {
+        match open_input(sample_rate, in_ch_count, input_name) {
             Ok((buf, stream)) => (Some(buf), Some(stream)),
             Err(e) => {
                 eprintln!("warn: audio input: {e} — plugin inputs will be silence");
@@ -394,7 +453,7 @@ pub fn open(
     };
 
     if let Some(activate) = unsafe { (*plugin).activate }
-        && !unsafe { activate(plugin, sample_rate, 1, MAX_FRAMES as u32) }
+        && !unsafe { activate(plugin, f64::from(sample_rate), 1, MAX_FRAMES as u32) }
     {
         return Err("plugin.activate returned false".into());
     }
@@ -404,37 +463,63 @@ pub fn open(
 
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = Arc::new(AtomicBool::new(false));
-    let mut engine = Engine::new(
-        plugin,
-        device_channels,
-        capture_buf,
-        midi_rx,
-        ui_rx,
-        Arc::clone(&stop),
-        Arc::clone(&stopped),
-    );
+    let mk_engine = || {
+        Engine::new(
+            plugin,
+            device_channels,
+            capture_buf.clone(),
+            Queue::clone(&midi_rx),
+            Queue::clone(&ui_rx),
+            Arc::clone(&stop),
+            Arc::clone(&stopped),
+        )
+    };
+    let engine = mk_engine();
     let (in_ports, out_ports) = engine.port_layout();
     let dialect = engine.dialect();
 
-    let stream_config = cpal::StreamConfig {
-        channels: config.channels(),
-        sample_rate: config.sample_rate(),
-        buffer_size: cpal::BufferSize::Default,
-    };
-    let stream = device
-        .build_output_stream::<f32, _, _>(
+    let build = |engine: Engine, buffer_size: cpal::BufferSize| {
+        let mut engine = engine;
+        let stream_config = cpal::StreamConfig {
+            channels: config.channels(),
+            sample_rate,
+            buffer_size,
+        };
+        device.build_output_stream::<f32, _, _>(
             stream_config,
             move |data: &mut [f32], _| engine.process(data),
             |e| eprintln!("audio error: {e}"),
             None,
         )
-        .map_err(|e| {
-            // The plugin was activated above but never started — roll back.
-            if let Some(deactivate) = unsafe { (*plugin).deactivate } {
-                unsafe { deactivate(plugin) };
+    };
+    let requested = settings
+        .buffer_size
+        .map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed);
+    let stream = match build(engine, requested) {
+        Ok(stream) => stream,
+        Err(first_err) => {
+            let rollback = |e: String| {
+                // The plugin was activated above but never started — roll back.
+                if let Some(deactivate) = unsafe { (*plugin).deactivate } {
+                    unsafe { deactivate(plugin) };
+                }
+                e
+            };
+            // Some backends (e.g. WASAPI shared) reject a fixed buffer size;
+            // retry once with the backend default before giving up.
+            if !matches!(requested, cpal::BufferSize::Fixed(_)) {
+                return Err(rollback(format!("build_output_stream: {first_err}")));
             }
-            format!("build_output_stream: {e}")
-        })?;
+            eprintln!(
+                "warn: fixed buffer size {} rejected ({first_err}) — using backend default",
+                settings.buffer_size.unwrap_or_default()
+            );
+            match build(mk_engine(), cpal::BufferSize::Default) {
+                Ok(stream) => stream,
+                Err(e) => return Err(rollback(format!("build_output_stream: {e}"))),
+            }
+        }
+    };
     if let Err(e) = stream.play() {
         if let Some(deactivate) = unsafe { (*plugin).deactivate } {
             unsafe { deactivate(plugin) };
@@ -448,7 +533,7 @@ pub fn open(
         plugin: PluginPtr(plugin),
         stop,
         stopped,
-        sample_rate,
+        sample_rate: f64::from(sample_rate),
         device_channels,
         in_ports,
         out_ports,

@@ -147,35 +147,43 @@ fn main() {
         print_params(plugin);
     }
 
-    if args.gui {
-        let (name, id) = unsafe { plugin_name_id(plugin) };
-        if let Err(e) = gui::run(
-            plugin,
-            &name,
-            &id,
-            args.midi_in.as_deref(),
-            args.input_device.as_deref(),
-            Path::new(&path),
-        ) {
-            eprintln!("error: gui: {e}");
+    if args.gui || args.play {
+        let settings = audio::StreamSettings {
+            sample_rate: args.sample_rate,
+            buffer_size: args.buffer_size,
+        };
+        if args.gui {
+            let (name, id) = unsafe { plugin_name_id(plugin) };
+            if let Err(e) = gui::run(
+                plugin,
+                &name,
+                &id,
+                args.midi_in.as_deref(),
+                args.input_device.as_deref(),
+                Path::new(&path),
+                settings.clone(),
+            ) {
+                eprintln!("error: gui: {e}");
+            }
+            // gui::run returns when the window closes; fall through to destroy.
         }
-        // gui::run returns when the window closes; fall through to destroy.
-    }
 
-    if args.play {
-        let midi_q = events::queue();
-        // Connection must outlive the stream: dropping it closes the MIDI port.
-        let _conn = midi::open(args.midi_in.as_deref(), &midi_q)
-            .inspect_err(|e| eprintln!("warn: {e} — running without MIDI"))
-            .ok();
-        run_play(
-            plugin,
-            midi_q,
-            events::queue(),
-            args.output_device.as_deref(),
-            args.input_device.as_deref(),
-        );
-        // run_play loops forever; if it returns, fall through to destroy.
+        if args.play {
+            let midi_q = events::queue();
+            // Connection must outlive the stream: dropping it closes the MIDI port.
+            let _conn = midi::open(args.midi_in.as_deref(), &midi_q)
+                .inspect_err(|e| eprintln!("warn: {e} — running without MIDI"))
+                .ok();
+            run_play(
+                plugin,
+                midi_q,
+                events::queue(),
+                args.output_device.as_deref(),
+                args.input_device.as_deref(),
+                &settings,
+            );
+            // run_play loops forever; if it returns, fall through to destroy.
+        }
     }
 
     if let Some(destroy) = unsafe { (*plugin).destroy } {
@@ -300,11 +308,13 @@ fn run_play(
     ui_rx: Queue<UiEvent>,
     device_name: Option<&str>,
     input_name: Option<&str>,
+    settings: &audio::StreamSettings,
 ) {
-    let session = audio::open(plugin, device_name, input_name, midi_rx, ui_rx).unwrap_or_else(|e| {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    });
+    let session = audio::open(plugin, device_name, input_name, midi_rx, ui_rx, settings)
+        .unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        });
     println!(
         "audio ports: in {:?} / out {:?} (channels per port), note dialect {:?}",
         session.in_ports, session.out_ports, session.dialect

@@ -21,5 +21,12 @@ slint = { version = "=1.17.1", default-features = true, features = ["backend-win
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
 
+[features]
+# ASIO audio backend (cpal). Build-time requirements beyond a normal build:
+# the Steinberg ASIO SDK, pointed to by the CPAL_ASIO_DIR env var, plus
+# LLVM/Clang for bindgen (LIBCLANG_PATH). See cpal's README ("ASIO on Windows").
+default = []
+asio = ["clap-host-core/asio"]
+
 [build-dependencies]
 slint-build = "=1.17.1"

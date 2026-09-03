@@ -26,3 +26,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[features]
+# ASIO audio backend via cpal. Needs the Steinberg ASIO SDK (CPAL_ASIO_DIR)
+# and LLVM/Clang (LIBCLANG_PATH) at build time — off by default.
+default = []
+asio = ["cpal/asio"]

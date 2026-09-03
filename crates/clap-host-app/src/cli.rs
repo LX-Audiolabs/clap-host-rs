@@ -6,7 +6,8 @@ pub const USAGE: &str = "usage: clap-host-rs [--scan | --plugin <path.clap> [--i
                          [--list-params] [--list-presets] \
                          [--pull-preset <key> --out <file>] [--set <id>=<val>]... \
                          [--load-state <file>] [--save-state <file>] \
-                         [--play | --gui [--output-device <name>] [--input-device <name>]] \
+                         [--play | --gui [--output-device <name>] [--input-device <name>] \
+                         [--sample-rate <hz>] [--buffer-size <frames>]] \
                          [--list-midi] [--midi-in <name>]] [--list-devices]";
 
 // A CLI flag struct is exactly the case this lint doesn't help — each bool
@@ -31,6 +32,8 @@ pub struct Args {
     pub sets: Vec<(u32, f64)>,
     pub list_midi: bool,
     pub midi_in: Option<String>,
+    pub sample_rate: Option<u32>,
+    pub buffer_size: Option<u32>,
 }
 
 pub fn parse_args() -> Args {
@@ -63,6 +66,14 @@ pub fn parse_args() -> Args {
             "--midi-in" => {
                 i += 1;
                 a.midi_in = argv.get(i).cloned();
+            }
+            "--sample-rate" => {
+                i += 1;
+                a.sample_rate = argv.get(i).and_then(|s| s.parse().ok());
+            }
+            "--buffer-size" => {
+                i += 1;
+                a.buffer_size = argv.get(i).and_then(|s| s.parse().ok());
             }
             "--set" => {
                 i += 1;
