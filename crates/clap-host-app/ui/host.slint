@@ -40,8 +40,16 @@ export component HostWindow inherits Window {
     in-out property <int> octave: 4;
     in-out property <string> log-text: "";
     in property <bool> state-dirty: false;
+    in property <bool> remote-available: false;
+    in property <string> remote-page-name: "";
+    in property <int> remote-page: 0;
+    in property <int> remote-page-count: 0;
+    in property <[ParamRow]> remote-params: [];
 
     callback param-changed(int, float);
+    callback remote-prev();
+    callback remote-next();
+    callback remote-param-changed(int, float);
     callback save-state();
     callback load-state();
     callback audio-device-changed(int);
@@ -227,6 +235,49 @@ export component HostWindow inherits Window {
                                     changed(v) => { root.param-changed(p.id, v); }
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Remote controls: the plugin's own "most important params" pages.
+                if root.remote-available: Rectangle {
+                    background: HostTheme.surface-container;
+                    border-radius: HostTheme.radius-md;
+                    border-width: 1px;
+                    border-color: HostTheme.outline-variant;
+
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: root.remote-page-name + "  (" + (root.remote-page + 1) + "/" + root.remote-page-count + ")";
+                                color: HostTheme.on-surface-variant;
+                                font-size: HostTheme.font-label;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Button {
+                                text: "‹";
+                                enabled: root.remote-page > 0;
+                                clicked => { root.remote-prev(); }
+                            }
+                            Button {
+                                text: "›";
+                                enabled: root.remote-page + 1 < root.remote-page-count;
+                                clicked => { root.remote-next(); }
+                            }
+                        }
+
+                        for p[i] in root.remote-params: ParamSlider {
+                            label: p.name;
+                            value: p.value;
+                            minimum: p.minimum;
+                            maximum: p.maximum;
+                            value-text: p.text;
+                            changed(v) => { root.remote-param-changed(p.id, v); }
                         }
                     }
                 }

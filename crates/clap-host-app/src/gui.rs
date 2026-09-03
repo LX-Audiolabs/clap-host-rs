@@ -75,6 +75,9 @@ struct Host {
     midi_conn: Option<midir::MidiInputConnection<()>>,
     /// `params()` is asked once; only values are polled after that.
     params: Vec<ParamInfo>,
+    /// Remote-controls pages (empty = plugin has no clap.remote-controls).
+    remote_pages: Vec<clap_host_core::remote_controls::PageInfo>,
+    remote_page: usize,
     /// Fixed state path: the plugin file with a `.state.bin` suffix.
     state_path: PathBuf,
 }
@@ -102,6 +105,41 @@ fn param_rows(host: &Host) -> Vec<ParamRow> {
         .collect()
 }
 
+/// ParamRows for the current remote-controls page; params the plugin did not
+/// expose in its regular param list are skipped.
+fn remote_rows(host: &Host) -> Vec<ParamRow> {
+    let Some(page) = host.remote_pages.get(host.remote_page) else {
+        return Vec::new();
+    };
+    page.params
+        .iter()
+        .filter_map(|&id| host.params.iter().find(|p| p.id == id))
+        .map(|p| {
+            let value = loader::param_value(host.plugin(), p.id).unwrap_or(p.value);
+            ParamRow {
+                id: p.id as i32,
+                name: SharedString::from(&p.name),
+                value: value as f32,
+                minimum: p.min as f32,
+                maximum: p.max as f32,
+                text: SharedString::from(loader::param_text(host.plugin(), p.id, value)),
+            }
+        })
+        .collect()
+}
+
+/// Page name + indices for the Slint header (page/page-count are 0 when empty).
+fn remote_nav(host: &Host) -> (SharedString, i32, i32) {
+    match host.remote_pages.get(host.remote_page) {
+        Some(page) => (
+            SharedString::from(&page.name),
+            host.remote_page as i32,
+            host.remote_pages.len() as i32,
+        ),
+        None => (SharedString::new(), 0, 0),
+    }
+}
+
 /// Open the Slint shell. Returns when the window closes.
 pub fn run(
     plugin: *const clap_plugin,
@@ -125,6 +163,12 @@ pub fn run(
         gui: None,
         midi_conn: None,
         params: loader::params(plugin),
+        remote_pages: if clap_host_core::remote_controls::available(plugin) {
+            clap_host_core::remote_controls::pages(plugin)
+        } else {
+            Vec::new()
+        },
+        remote_page: 0,
         state_path,
     }));
 
@@ -164,6 +208,15 @@ pub fn run(
 
     let params_model = Rc::new(VecModel::from(param_rows(&host.borrow())));
     ui.set_params(ModelRc::from(Rc::clone(&params_model)));
+    let remote_model = Rc::new(VecModel::from(remote_rows(&host.borrow())));
+    ui.set_remote_params(ModelRc::from(Rc::clone(&remote_model)));
+    {
+        let (name, page, count) = remote_nav(&host.borrow());
+        ui.set_remote_available(!host.borrow().remote_pages.is_empty());
+        ui.set_remote_page_name(name);
+        ui.set_remote_page(page);
+        ui.set_remote_page_count(count);
+    }
 
     // Start on the default device, and on the requested MIDI port if given.
     start_audio(&ui, &host, None);
@@ -288,6 +341,47 @@ pub fn run(
 
     {
         let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
+        ui.on_remote_prev(move || {
+            let Some(ui) = ui_w.upgrade() else { return };
+            let mut h = host.borrow_mut();
+            h.remote_page = h.remote_page.saturating_sub(1);
+            ui.set_remote_page(h.remote_page as i32);
+            if let Some(page) = h.remote_pages.get(h.remote_page) {
+                ui.set_remote_page_name(SharedString::from(&page.name));
+            }
+        });
+    }
+    {
+        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
+        ui.on_remote_next(move || {
+            let Some(ui) = ui_w.upgrade() else { return };
+            let mut h = host.borrow_mut();
+            if h.remote_page + 1 < h.remote_pages.len() {
+                h.remote_page += 1;
+            }
+            ui.set_remote_page(h.remote_page as i32);
+            if let Some(page) = h.remote_pages.get(h.remote_page) {
+                ui.set_remote_page_name(SharedString::from(&page.name));
+            }
+        });
+    }
+    {
+        let host = Rc::clone(&host);
+        ui.on_remote_param_changed(move |id, value| {
+            let h = host.borrow();
+            let id = id as u32;
+            let value = f64::from(value);
+            // Same event path as on_param_changed — a page is just another view.
+            if h.session.is_some() {
+                let _ = h.ui_q.push(UiEvent::Param { id, value });
+            } else if let Err(e) = loader::set_param(h.plugin(), id, value) {
+                eprintln!("warn: set param {id}: {e}");
+            }
+        });
+    }
+
+    {
+        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
         ui.on_save_state(move || {
             let Some(ui) = ui_w.upgrade() else { return };
             let h = host.borrow();
@@ -332,6 +426,7 @@ pub fn run(
     {
         let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
         let params_model = Rc::clone(&params_model);
+        let remote_model = Rc::clone(&remote_model);
         timer.start(slint::TimerMode::Repeated, POLL, move || {
             let Some(ui) = ui_w.upgrade() else { return };
             pump_main_thread(host.borrow().plugin());
@@ -348,6 +443,24 @@ pub fn run(
             }
             if take_state_dirty() {
                 ui.set_state_dirty(true);
+            }
+            if clap_host_core::host::take_remote_controls_dirty() {
+                let mut h = host.borrow_mut();
+                h.remote_pages = clap_host_core::remote_controls::pages(h.plugin());
+                if h.remote_page >= h.remote_pages.len() {
+                    h.remote_page = h.remote_pages.len().saturating_sub(1);
+                }
+                let (name, page, count) = remote_nav(&h);
+                ui.set_remote_available(!h.remote_pages.is_empty());
+                ui.set_remote_page_name(name);
+                ui.set_remote_page(page);
+                ui.set_remote_page_count(count);
+            }
+            let rows = remote_rows(&host.borrow());
+            for (i, row) in rows.into_iter().enumerate() {
+                if remote_model.row_data(i).as_ref() != Some(&row) {
+                    remote_model.set_row_data(i, row);
+                }
             }
 
             // ponytail: polling get_value instead of reading the plugin's output
