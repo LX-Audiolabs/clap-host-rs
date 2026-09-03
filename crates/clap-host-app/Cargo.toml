@@ -15,7 +15,11 @@ path = "src/main.rs"
 [dependencies]
 clap-host-core = { path = "../clap-host-core" }
 midir = "0.11"
-slint = { version = "=1.17.1", default-features = true, features = ["backend-winit", "renderer-femtovg", "compat-1-2"] }
+raw-window-handle = "0.6"
+slint = { version = "=1.17.1", default-features = true, features = ["backend-winit", "renderer-femtovg", "compat-1-2", "raw-window-handle-06"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
 
 [build-dependencies]
 slint-build = "=1.17.1"

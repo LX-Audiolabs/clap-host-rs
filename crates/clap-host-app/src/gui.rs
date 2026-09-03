@@ -33,6 +33,35 @@ slint::include_modules!();
 /// How often the UI re-reads param values and runs the plugin's main-thread work.
 const POLL: Duration = Duration::from_millis(50);
 
+/// Either kind of plugin window we can have open. Neither variant's payload is
+/// read again after construction — closing/cleanup happens entirely through
+/// `Drop`. Windows-only: embedded GUIs need a Win32 parent HWND (Slint+winit).
+#[allow(dead_code)]
+enum PluginWindow {
+    Floating(FloatingGui),
+    #[cfg(windows)]
+    Embedded(clap_host_core::win32_embed::EmbeddedGui),
+}
+
+/// Where the embedded plugin socket sits in our window's client area (physical
+/// px). The window grows to make room for it after a successful open.
+#[cfg(windows)]
+const EMBED_X: i32 = 16;
+#[cfg(windows)]
+const EMBED_Y: i32 = 480;
+
+/// Raw HWND of our own top-level window, to embed a plugin's GUI into.
+#[cfg(windows)]
+fn parent_hwnd(ui: &HostWindow) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let slint_handle = ui.window().window_handle();
+    let handle = HasWindowHandle::window_handle(&slint_handle).ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as windows_sys::Win32::Foundation::HWND),
+        _ => None,
+    }
+}
+
 /// Everything the callbacks mutate. Single-threaded, hence `RefCell`.
 struct Host {
     plugin: PluginPtr,
@@ -42,7 +71,7 @@ struct Host {
     midi_q: Queue<RawMidi>,
     ui_q: Queue<UiEvent>,
     session: Option<Session>,
-    gui: Option<FloatingGui>,
+    gui: Option<PluginWindow>,
     midi_conn: Option<midir::MidiInputConnection<()>>,
     /// `params()` is asked once; only values are polled after that.
     params: Vec<ParamInfo>,
@@ -101,7 +130,11 @@ pub fn run(
 
     ui.set_plugin_name(SharedString::from(name));
     ui.set_plugin_id(SharedString::from(id));
-    ui.set_gui_available(supports_floating(plugin));
+    #[cfg(windows)]
+    let can_embed = clap_host_core::win32_embed::supports_embedded(plugin);
+    #[cfg(not(windows))]
+    let can_embed = false;
+    ui.set_gui_available(supports_floating(plugin) || can_embed);
 
     let devices = audio::output_devices();
     let ports = midi::port_names();
@@ -216,10 +249,39 @@ pub fn run(
 
             match FloatingGui::open(plugin, ui.get_plugin_name().as_str()) {
                 Ok(gui) => {
-                    h.gui = Some(gui);
+                    h.gui = Some(PluginWindow::Floating(gui));
                     ui.set_gui_open(true);
                 }
-                Err(e) => ui.set_log_text(SharedString::from(format!("plugin GUI: {e}"))),
+                Err(float_err) => {
+                    #[cfg(windows)]
+                    if clap_host_core::win32_embed::supports_embedded(plugin)
+                        && let Some(parent) = parent_hwnd(&ui)
+                    {
+                        match clap_host_core::win32_embed::EmbeddedGui::open(
+                            plugin, parent, EMBED_X, EMBED_Y,
+                        ) {
+                            Ok(embedded) => {
+                                let (w, h_px) = embedded.size();
+                                let cur = ui.window().size();
+                                ui.window().set_size(slint::WindowSize::Physical(
+                                    slint::PhysicalSize::new(
+                                        cur.width.max(EMBED_X as u32 + w + 16),
+                                        cur.height.max(EMBED_Y as u32 + h_px + 16),
+                                    ),
+                                ));
+                                h.gui = Some(PluginWindow::Embedded(embedded));
+                                ui.set_gui_open(true);
+                            }
+                            Err(embed_err) => {
+                                ui.set_log_text(SharedString::from(format!(
+                                    "plugin GUI: {float_err}; embed: {embed_err}"
+                                )));
+                            }
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    ui.set_log_text(SharedString::from(format!("plugin GUI: {float_err}")));
+                }
             }
         });
     }
