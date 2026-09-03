@@ -47,13 +47,20 @@ Notation: `HOST` = `target/debug/clap-host-rs` (or `target/release/clap-host-rs`
         (audible in the synth); the displayed value follows.
 15. [ ] **Keyboard**: with the window focused, computer keyboard keys trigger
         notes; releasing stops them.
-16. [ ] **Plugin GUI**: the toggle opens the plugin's floating window; closing
-        it from the plugin side turns the toggle off.
-17. [ ] **State save/load**: the buttons write/read `<plugin>.state.bin`;
+16. [ ] **Plugin GUI**: the toggle opens the plugin's floating window; if the
+        plugin only supports an embedded GUI, the editor appears inside the
+        host window; closing it from the plugin side turns the toggle off.
+17. [ ] **Remote controls**: a plugin with `clap.remote-controls` shows the
+        page panel (page name + ‹/›); ‹/› page through the pages and the
+        sliders drive the parameters.
+18. [ ] **Setup**: the Setup button opens the dialog; changing a device
+        restarts audio; the previous selection is still selected when the
+        dialog is reopened.
+19. [ ] **State save/load**: the buttons write/read `<plugin>.state.bin`;
         after a parameter change the dirty dot appears, save clears it, load
         restores the slider values.
 
 ## Regression guards
 
-18. [ ] `cargo test --workspace` — all tests pass.
-19. [ ] `cargo clippy --workspace --all-targets -- -D warnings` — no warnings.
+20. [ ] `cargo test --workspace` — all tests pass.
+21. [ ] `cargo clippy --workspace --all-targets -- -D warnings` — no warnings.

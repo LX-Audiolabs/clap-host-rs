@@ -45,11 +45,15 @@ without `--plugin`.
 
 ## GUI
 
-Slint window (`--gui`): output/input device pickers, a scrollable parameter
-list with sliders, a computer-keyboard piano (focused window = playing), a
-toggle for the plugin's floating window, and state save/load with a dirty
-indicator (the plugin's `state.mark_dirty` lights a dot; save/load use
-`<plugin-file>.state.bin` next to the plugin binary).
+Slint window (`--gui`): a Setup dialog for audio/MIDI device selection, a
+scrollable parameter list with sliders, a computer-keyboard piano (focused
+window = playing), a toggle for the plugin's floating window, and state
+save/load with a dirty indicator (the plugin's `state.mark_dirty` lights a
+dot; save/load use `<plugin-file>.state.bin` next to the plugin binary).
+If the plugin only supports an embedded GUI, the editor opens inside the
+host window instead (Windows). Plugins exposing `clap.remote-controls`
+get a paging panel (page name + prev/next buttons) whose sliders mirror
+the plugin's parameter pages.
 
 ## Architecture
 
@@ -69,9 +73,6 @@ Two crates:
 
 Known gaps, roughly ordered by usefulness:
 
-- Plugin window embedding (`SetParent`/`WS_CHILD`) — plugin window currently
-  floats beside the host window.
-- `remote-controls` host extension for DAW-like control surfaces.
 - Audio thread pool — one cpal callback per plugin blocks a multi-plugin
   graph.
 - Transport/timeline (`clap_transport`) — the engine currently passes a null
