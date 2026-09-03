@@ -33,6 +33,35 @@ slint::include_modules!();
 /// How often the UI re-reads param values and runs the plugin's main-thread work.
 const POLL: Duration = Duration::from_millis(50);
 
+/// Either kind of plugin window we can have open. Neither variant's payload is
+/// read again after construction — closing/cleanup happens entirely through
+/// `Drop`. Windows-only: embedded GUIs need a Win32 parent HWND (Slint+winit).
+#[allow(dead_code)]
+enum PluginWindow {
+    Floating(FloatingGui),
+    #[cfg(windows)]
+    Embedded(clap_host_core::win32_embed::EmbeddedGui),
+}
+
+/// Where the embedded plugin socket sits in our window's client area (physical
+/// px). The window grows to make room for it after a successful open.
+#[cfg(windows)]
+const EMBED_X: i32 = 16;
+#[cfg(windows)]
+const EMBED_Y: i32 = 480;
+
+/// Raw HWND of our own top-level window, to embed a plugin's GUI into.
+#[cfg(windows)]
+fn parent_hwnd(ui: &HostWindow) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let slint_handle = ui.window().window_handle();
+    let handle = HasWindowHandle::window_handle(&slint_handle).ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as windows_sys::Win32::Foundation::HWND),
+        _ => None,
+    }
+}
+
 /// Everything the callbacks mutate. Single-threaded, hence `RefCell`.
 struct Host {
     plugin: PluginPtr,
@@ -42,10 +71,13 @@ struct Host {
     midi_q: Queue<RawMidi>,
     ui_q: Queue<UiEvent>,
     session: Option<Session>,
-    gui: Option<FloatingGui>,
+    gui: Option<PluginWindow>,
     midi_conn: Option<midir::MidiInputConnection<()>>,
     /// `params()` is asked once; only values are polled after that.
     params: Vec<ParamInfo>,
+    /// Remote-controls pages (empty = plugin has no clap.remote-controls).
+    remote_pages: Vec<clap_host_core::remote_controls::PageInfo>,
+    remote_page: usize,
     /// Fixed state path: the plugin file with a `.state.bin` suffix.
     state_path: PathBuf,
 }
@@ -73,6 +105,41 @@ fn param_rows(host: &Host) -> Vec<ParamRow> {
         .collect()
 }
 
+/// ParamRows for the current remote-controls page; params the plugin did not
+/// expose in its regular param list are skipped.
+fn remote_rows(host: &Host) -> Vec<ParamRow> {
+    let Some(page) = host.remote_pages.get(host.remote_page) else {
+        return Vec::new();
+    };
+    page.params
+        .iter()
+        .filter_map(|&id| host.params.iter().find(|p| p.id == id))
+        .map(|p| {
+            let value = loader::param_value(host.plugin(), p.id).unwrap_or(p.value);
+            ParamRow {
+                id: p.id as i32,
+                name: SharedString::from(&p.name),
+                value: value as f32,
+                minimum: p.min as f32,
+                maximum: p.max as f32,
+                text: SharedString::from(loader::param_text(host.plugin(), p.id, value)),
+            }
+        })
+        .collect()
+}
+
+/// Page name + indices for the Slint header (page/page-count are 0 when empty).
+fn remote_nav(host: &Host) -> (SharedString, i32, i32) {
+    match host.remote_pages.get(host.remote_page) {
+        Some(page) => (
+            SharedString::from(&page.name),
+            host.remote_page as i32,
+            host.remote_pages.len() as i32,
+        ),
+        None => (SharedString::new(), 0, 0),
+    }
+}
+
 /// Open the Slint shell. Returns when the window closes.
 pub fn run(
     plugin: *const clap_plugin,
@@ -83,6 +150,8 @@ pub fn run(
     plugin_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ui = HostWindow::new()?;
+    // Hidden until the Setup button shows it; lives as long as `ui`.
+    let setup = SetupDialog::new()?;
 
     let mut state_path = plugin_path.to_path_buf();
     state_path.as_mut_os_string().push(".state.bin");
@@ -96,12 +165,22 @@ pub fn run(
         gui: None,
         midi_conn: None,
         params: loader::params(plugin),
+        remote_pages: if clap_host_core::remote_controls::available(plugin) {
+            clap_host_core::remote_controls::pages(plugin)
+        } else {
+            Vec::new()
+        },
+        remote_page: 0,
         state_path,
     }));
 
     ui.set_plugin_name(SharedString::from(name));
     ui.set_plugin_id(SharedString::from(id));
-    ui.set_gui_available(supports_floating(plugin));
+    #[cfg(windows)]
+    let can_embed = clap_host_core::win32_embed::supports_embedded(plugin);
+    #[cfg(not(windows))]
+    let can_embed = false;
+    ui.set_gui_available(supports_floating(plugin) || can_embed);
 
     let devices = audio::output_devices();
     let ports = midi::port_names();
@@ -131,6 +210,15 @@ pub fn run(
 
     let params_model = Rc::new(VecModel::from(param_rows(&host.borrow())));
     ui.set_params(ModelRc::from(Rc::clone(&params_model)));
+    let remote_model = Rc::new(VecModel::from(remote_rows(&host.borrow())));
+    ui.set_remote_params(ModelRc::from(Rc::clone(&remote_model)));
+    {
+        let (name, page, count) = remote_nav(&host.borrow());
+        ui.set_remote_available(!host.borrow().remote_pages.is_empty());
+        ui.set_remote_page_name(name);
+        ui.set_remote_page(page);
+        ui.set_remote_page_count(count);
+    }
 
     // Start on the default device, and on the requested MIDI port if given.
     start_audio(&ui, &host, None);
@@ -146,6 +234,18 @@ pub fn run(
             None => ui.set_midi_status(SharedString::from(format!("no port matching {want:?}"))),
         }
     }
+
+    // Mirror the pickers into the Setup dialog: the models are shared
+    // (`ModelRc` clones), the indices are copies both windows write back to
+    // each other. The main window keeps its copies — the restart path below
+    // reads `ui.get_audio_devices()` / `ui.get_audio_index()`.
+    setup.set_audio_devices(ui.get_audio_devices());
+    setup.set_audio_in_devices(ui.get_audio_in_devices());
+    setup.set_midi_ports(ui.get_midi_ports());
+    setup.set_has_audio_in(ui.get_has_audio_in());
+    setup.set_audio_index(ui.get_audio_index());
+    setup.set_audio_in_index(ui.get_audio_in_index());
+    setup.set_midi_index(ui.get_midi_index());
 
     {
         let host = Rc::clone(&host);
@@ -170,39 +270,17 @@ pub fn run(
         ui.on_note_off(move |key| push_note(&host.borrow(), 0x80, key));
     }
     {
-        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
-        ui.on_audio_device_changed(move |index| {
+        let (ui_w, setup_w) = (ui.as_weak(), setup.as_weak());
+        ui.on_open_setup(move || {
             let Some(ui) = ui_w.upgrade() else { return };
-            let name = ui.get_audio_devices().row_data(index as usize);
-            start_audio(&ui, &host, name.as_deref());
+            let Some(setup) = setup_w.upgrade() else { return };
+            if let Err(e) = setup.show() {
+                ui.set_log_text(SharedString::from(format!("setup dialog: {e}")));
+            }
+            setup.window().request_redraw();
         });
     }
-    {
-        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
-        ui.on_audio_in_changed(move |index| {
-            let Some(ui) = ui_w.upgrade() else { return };
-            let in_name = ui.get_audio_in_devices().row_data(index as usize);
-            host.borrow_mut().input_name = in_name.as_deref().map(str::to_owned);
-            // Keep the current output device; only the capture side switches.
-            let out_name = ui
-                .get_audio_devices()
-                .row_data(ui.get_audio_index().max(0) as usize);
-            start_audio(&ui, &host, out_name.as_deref());
-        });
-    }
-    {
-        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
-        ui.on_midi_port_changed(move |index| {
-            let Some(ui) = ui_w.upgrade() else { return };
-            // Row 0 is "(none)".
-            let name = if index <= 0 {
-                None
-            } else {
-                ui.get_midi_ports().row_data(index as usize)
-            };
-            start_midi(&ui, &host, name.as_deref());
-        });
-    }
+    wire_device_callbacks(&ui, &setup, &host);
     {
         let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
         ui.on_toggle_gui(move || {
@@ -216,10 +294,80 @@ pub fn run(
 
             match FloatingGui::open(plugin, ui.get_plugin_name().as_str()) {
                 Ok(gui) => {
-                    h.gui = Some(gui);
+                    h.gui = Some(PluginWindow::Floating(gui));
                     ui.set_gui_open(true);
                 }
-                Err(e) => ui.set_log_text(SharedString::from(format!("plugin GUI: {e}"))),
+                Err(float_err) => {
+                    #[cfg(windows)]
+                    if clap_host_core::win32_embed::supports_embedded(plugin)
+                        && let Some(parent) = parent_hwnd(&ui)
+                    {
+                        match clap_host_core::win32_embed::EmbeddedGui::open(
+                            plugin, parent, EMBED_X, EMBED_Y,
+                        ) {
+                            Ok(embedded) => {
+                                let (w, h_px) = embedded.size();
+                                let cur = ui.window().size();
+                                ui.window().set_size(slint::WindowSize::Physical(
+                                    slint::PhysicalSize::new(
+                                        cur.width.max(EMBED_X as u32 + w + 16),
+                                        cur.height.max(EMBED_Y as u32 + h_px + 16),
+                                    ),
+                                ));
+                                h.gui = Some(PluginWindow::Embedded(embedded));
+                                ui.set_gui_open(true);
+                            }
+                            Err(embed_err) => {
+                                ui.set_log_text(SharedString::from(format!(
+                                    "plugin GUI: {float_err}; embed: {embed_err}"
+                                )));
+                            }
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    ui.set_log_text(SharedString::from(format!("plugin GUI: {float_err}")));
+                }
+            }
+        });
+    }
+
+    {
+        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
+        ui.on_remote_prev(move || {
+            let Some(ui) = ui_w.upgrade() else { return };
+            let mut h = host.borrow_mut();
+            h.remote_page = h.remote_page.saturating_sub(1);
+            ui.set_remote_page(h.remote_page as i32);
+            if let Some(page) = h.remote_pages.get(h.remote_page) {
+                ui.set_remote_page_name(SharedString::from(&page.name));
+            }
+        });
+    }
+    {
+        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
+        ui.on_remote_next(move || {
+            let Some(ui) = ui_w.upgrade() else { return };
+            let mut h = host.borrow_mut();
+            if h.remote_page + 1 < h.remote_pages.len() {
+                h.remote_page += 1;
+            }
+            ui.set_remote_page(h.remote_page as i32);
+            if let Some(page) = h.remote_pages.get(h.remote_page) {
+                ui.set_remote_page_name(SharedString::from(&page.name));
+            }
+        });
+    }
+    {
+        let host = Rc::clone(&host);
+        ui.on_remote_param_changed(move |id, value| {
+            let h = host.borrow();
+            let id = id as u32;
+            let value = f64::from(value);
+            // Same event path as on_param_changed — a page is just another view.
+            if h.session.is_some() {
+                let _ = h.ui_q.push(UiEvent::Param { id, value });
+            } else if let Err(e) = loader::set_param(h.plugin(), id, value) {
+                eprintln!("warn: set param {id}: {e}");
             }
         });
     }
@@ -270,6 +418,7 @@ pub fn run(
     {
         let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
         let params_model = Rc::clone(&params_model);
+        let remote_model = Rc::clone(&remote_model);
         timer.start(slint::TimerMode::Repeated, POLL, move || {
             let Some(ui) = ui_w.upgrade() else { return };
             pump_main_thread(host.borrow().plugin());
@@ -286,6 +435,30 @@ pub fn run(
             }
             if take_state_dirty() {
                 ui.set_state_dirty(true);
+            }
+            if clap_host_core::host::take_remote_controls_dirty() {
+                let mut h = host.borrow_mut();
+                h.remote_pages = clap_host_core::remote_controls::pages(h.plugin());
+                if h.remote_page >= h.remote_pages.len() {
+                    h.remote_page = h.remote_pages.len().saturating_sub(1);
+                }
+                let (name, page, count) = remote_nav(&h);
+                ui.set_remote_available(!h.remote_pages.is_empty());
+                ui.set_remote_page_name(name);
+                ui.set_remote_page(page);
+                ui.set_remote_page_count(count);
+            }
+            let rows = remote_rows(&host.borrow());
+            // Pages can shrink or grow on a switch; set_row_data silently
+            // no-ops out of range, so resync the length before diff-updating.
+            if remote_model.row_count() != rows.len() {
+                remote_model.set_vec(rows);
+            } else {
+                for (i, row) in rows.into_iter().enumerate() {
+                    if remote_model.row_data(i).as_ref() != Some(&row) {
+                        remote_model.set_row_data(i, row);
+                    }
+                }
             }
 
             // ponytail: polling get_value instead of reading the plugin's output
@@ -306,6 +479,98 @@ pub fn run(
     h.session = None;
     h.midi_conn = None;
     Ok(())
+}
+
+/// Wire the three device callbacks on BOTH the main window and the Setup
+/// dialog. Identical handler logic on either side; each firing syncs the
+/// index to both windows before running the same switch as before.
+fn wire_device_callbacks(ui: &HostWindow, setup: &SetupDialog, host: &Rc<RefCell<Host>>) {
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        ui.on_audio_device_changed(move |index| pick_output_device(&ui_w, &setup_w, &host, index));
+    }
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        setup.on_audio_device_changed(move |index| pick_output_device(&ui_w, &setup_w, &host, index));
+    }
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        ui.on_audio_in_changed(move |index| pick_audio_input(&ui_w, &setup_w, &host, index));
+    }
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        setup.on_audio_in_changed(move |index| pick_audio_input(&ui_w, &setup_w, &host, index));
+    }
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        ui.on_midi_port_changed(move |index| pick_midi_port(&ui_w, &setup_w, &host, index));
+    }
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        setup.on_midi_port_changed(move |index| pick_midi_port(&ui_w, &setup_w, &host, index));
+    }
+}
+
+/// Output-device pick: restart audio on the chosen device. The device models
+/// and status lines live on the main window, so the handler reads them there
+/// regardless of which window's picker fired.
+fn pick_output_device(
+    ui_w: &slint::Weak<HostWindow>,
+    setup_w: &slint::Weak<SetupDialog>,
+    host: &Rc<RefCell<Host>>,
+    index: i32,
+) {
+    if let Some(setup) = setup_w.upgrade() {
+        setup.set_audio_index(index);
+    }
+    let Some(ui) = ui_w.upgrade() else { return };
+    // No-op when the main window's own (now hidden) picker fired — the
+    // two-way binding already set it — but the dialog path needs this write.
+    ui.set_audio_index(index);
+    let name = ui.get_audio_devices().row_data(index as usize);
+    start_audio(&ui, host, name.as_deref());
+}
+
+/// Audio-input pick: switch the capture side, keeping the current output.
+fn pick_audio_input(
+    ui_w: &slint::Weak<HostWindow>,
+    setup_w: &slint::Weak<SetupDialog>,
+    host: &Rc<RefCell<Host>>,
+    index: i32,
+) {
+    if let Some(setup) = setup_w.upgrade() {
+        setup.set_audio_in_index(index);
+    }
+    let Some(ui) = ui_w.upgrade() else { return };
+    ui.set_audio_in_index(index);
+    let in_name = ui.get_audio_in_devices().row_data(index as usize);
+    host.borrow_mut().input_name = in_name.as_deref().map(str::to_owned);
+    // Keep the current output device; only the capture side switches.
+    let out_name = ui
+        .get_audio_devices()
+        .row_data(ui.get_audio_index().max(0) as usize);
+    start_audio(&ui, host, out_name.as_deref());
+}
+
+/// MIDI-port pick; row 0 is "(none)".
+fn pick_midi_port(
+    ui_w: &slint::Weak<HostWindow>,
+    setup_w: &slint::Weak<SetupDialog>,
+    host: &Rc<RefCell<Host>>,
+    index: i32,
+) {
+    if let Some(setup) = setup_w.upgrade() {
+        setup.set_midi_index(index);
+    }
+    let Some(ui) = ui_w.upgrade() else { return };
+    ui.set_midi_index(index);
+    // Row 0 is "(none)".
+    let name = if index <= 0 {
+        None
+    } else {
+        ui.get_midi_ports().row_data(index as usize)
+    };
+    start_midi(&ui, host, name.as_deref());
 }
 
 fn push_note(host: &Host, status: u8, key: i32) {

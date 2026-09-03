@@ -831,8 +831,10 @@ version = "0.1.0"
 dependencies = [
  "clap-host-core",
  "midir",
+ "raw-window-handle",
  "slint",
  "slint-build",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -844,6 +846,7 @@ dependencies = [
  "crossbeam-queue",
  "libloading 0.9.0",
  "midir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4722,6 +4725,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",

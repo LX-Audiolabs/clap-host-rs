@@ -1,0 +1,64 @@
+// Setup dialog — the audio/MIDI device pickers, moved out of the main window.
+// Every change applies immediately, exactly like the old inline pickers;
+// there is no OK/Cancel, the window manager close button just hides it.
+
+import { ComboBox, VerticalBox } from "std-widgets.slint";
+import { HostTheme } from "theme.slint";
+
+export component SetupDialog inherits Window {
+    title: "Audio / MIDI Setup";
+    preferred-width: 440px;
+    preferred-height: 320px;
+    background: HostTheme.surface;
+
+    in property <[string]> audio-devices: [];
+    in property <[string]> audio-in-devices: [];
+    in property <[string]> midi-ports: [];
+    in property <bool> has-audio-in: false;
+    in-out property <int> audio-index: 0;
+    in-out property <int> audio-in-index: 0;
+    in-out property <int> midi-index: 0;
+
+    callback audio-device-changed(int);
+    callback audio-in-changed(int);
+    callback midi-port-changed(int);
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+        Text {
+            text: "Output device";
+            color: HostTheme.on-surface-variant;
+            font-size: HostTheme.font-label;
+        }
+        ComboBox {
+            model: root.audio-devices;
+            current-index <=> root.audio-index;
+            selected => { root.audio-device-changed(root.audio-index); }
+        }
+        Text {
+            text: "Audio input";
+            color: HostTheme.on-surface-variant;
+            font-size: HostTheme.font-label;
+            visible: root.has-audio-in;
+        }
+        ComboBox {
+            model: root.audio-in-devices;
+            current-index <=> root.audio-in-index;
+            visible: root.has-audio-in;
+            selected => { root.audio-in-changed(root.audio-in-index); }
+        }
+        Text {
+            text: "MIDI input";
+            color: HostTheme.on-surface-variant;
+            font-size: HostTheme.font-label;
+        }
+        ComboBox {
+            model: root.midi-ports;
+            current-index <=> root.midi-index;
+            selected => { root.midi-port-changed(root.midi-index); }
+        }
+        // ponytail: dialog closes via the window manager; no explicit OK/Cancel
+        // — every change applies immediately, matching the old inline pickers.
+    }
+}

@@ -15,3 +15,14 @@ libloading = "0.9"
 cpal = "0.18.2"
 midir = "0.11"
 crossbeam-queue = "0.3"
+
+# Embed the plugin's own GUI as a WS_CHILD of ours (SetParent) instead of a
+# floating top-level window. Windows-only; macOS (NSView) / Linux (X11) are
+# separate follow-ups.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }

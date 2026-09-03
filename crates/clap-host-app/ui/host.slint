@@ -1,10 +1,15 @@
-// clap-host-rs shell — device pick, param sliders, computer-keyboard notes,
-// and a button for the plugin's own (floating) window.
+// clap-host-rs shell — param sliders, computer-keyboard notes, a button for
+// the plugin's own (floating) window, and a Setup dialog for device pickers.
 // Ported from the aura-host shell; theme/widgets re-hosted locally.
 
 import { HostTheme } from "theme.slint";
 import { ParamSlider } from "widgets.slint";
-import { Button, ComboBox, ScrollView } from "std-widgets.slint";
+import { SetupDialog } from "setup.slint";
+import { Button, ScrollView } from "std-widgets.slint";
+
+// The dialog is its own window, compiled in via the import above; re-export
+// so the generated Rust exposes both window types from this one compile unit.
+export { SetupDialog }
 
 export struct ParamRow {
     id: int,
@@ -40,13 +45,22 @@ export component HostWindow inherits Window {
     in-out property <int> octave: 4;
     in-out property <string> log-text: "";
     in property <bool> state-dirty: false;
+    in property <bool> remote-available: false;
+    in property <string> remote-page-name: "";
+    in property <int> remote-page: 0;
+    in property <int> remote-page-count: 0;
+    in property <[ParamRow]> remote-params: [];
 
     callback param-changed(int, float);
+    callback remote-prev();
+    callback remote-next();
+    callback remote-param-changed(int, float);
     callback save-state();
     callback load-state();
     callback audio-device-changed(int);
     callback audio-in-changed(int);
     callback midi-port-changed(int);
+    callback open-setup();
     callback toggle-gui();
     callback note-on(int);
     callback note-off(int);
@@ -135,66 +149,29 @@ export component HostWindow inherits Window {
                         clicked => { root.load-state(); }
                     }
                     Button {
+                        text: "Setup";
+                        clicked => { root.open-setup(); }
+                    }
+                    Button {
                         text: root.gui-open ? "Close plugin GUI" : "Open plugin GUI";
                         enabled: root.gui-available;
                         clicked => { root.toggle-gui(); }
                     }
                 }
 
-                Rectangle {
-                    background: HostTheme.surface-container;
-                    border-radius: HostTheme.radius-md;
-                    border-width: 1px;
-                    border-color: HostTheme.outline-variant;
-
-                    VerticalLayout {
-                        padding: 14px;
-                        spacing: 10px;
-
-                        Text {
-                            text: "Output device";
-                            color: HostTheme.on-surface-variant;
-                            font-size: HostTheme.font-label;
-                        }
-                        ComboBox {
-                            model: root.audio-devices;
-                            current-index <=> root.audio-index;
-                            selected => { root.audio-device-changed(root.audio-index); }
-                        }
-                        Text {
-                            text: root.audio-status;
-                            color: HostTheme.on-surface-variant;
-                            font-size: 12px;
-                        }
-
-                        Text {
-                            text: "Audio input";
-                            color: HostTheme.on-surface-variant;
-                            font-size: HostTheme.font-label;
-                            visible: root.has-audio-in;
-                        }
-                        ComboBox {
-                            model: root.audio-in-devices;
-                            current-index <=> root.audio-in-index;
-                            visible: root.has-audio-in;
-                            selected => { root.audio-in-changed(root.audio-in-index); }
-                        }
-
-                        Text {
-                            text: "MIDI input";
-                            color: HostTheme.on-surface-variant;
-                            font-size: HostTheme.font-label;
-                        }
-                        ComboBox {
-                            model: root.midi-ports;
-                            current-index <=> root.midi-index;
-                            selected => { root.midi-port-changed(root.midi-index); }
-                        }
-                        Text {
-                            text: root.midi-status;
-                            color: HostTheme.on-surface-variant;
-                            font-size: 12px;
-                        }
+                // Status only — pickers live in the Setup dialog.
+                VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: root.audio-status;
+                        color: HostTheme.on-surface-variant;
+                        font-size: 12px;
+                    }
+                    Text {
+                        text: root.midi-status;
+                        color: HostTheme.on-surface-variant;
+                        font-size: 12px;
+                        visible: root.midi-status != "";
                     }
                 }
 
@@ -227,6 +204,49 @@ export component HostWindow inherits Window {
                                     changed(v) => { root.param-changed(p.id, v); }
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Remote controls: the plugin's own "most important params" pages.
+                if root.remote-available: Rectangle {
+                    background: HostTheme.surface-container;
+                    border-radius: HostTheme.radius-md;
+                    border-width: 1px;
+                    border-color: HostTheme.outline-variant;
+
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: root.remote-page-name + "  (" + (root.remote-page + 1) + "/" + root.remote-page-count + ")";
+                                color: HostTheme.on-surface-variant;
+                                font-size: HostTheme.font-label;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Button {
+                                text: "‹";
+                                enabled: root.remote-page > 0;
+                                clicked => { root.remote-prev(); }
+                            }
+                            Button {
+                                text: "›";
+                                enabled: root.remote-page + 1 < root.remote-page-count;
+                                clicked => { root.remote-next(); }
+                            }
+                        }
+
+                        for p[i] in root.remote-params: ParamSlider {
+                            label: p.name;
+                            value: p.value;
+                            minimum: p.minimum;
+                            maximum: p.maximum;
+                            value-text: p.text;
+                            changed(v) => { root.remote-param-changed(p.id, v); }
                         }
                     }
                 }
