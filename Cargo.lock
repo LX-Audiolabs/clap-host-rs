@@ -844,6 +844,7 @@ dependencies = [
  "crossbeam-queue",
  "libloading 0.9.0",
  "midir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

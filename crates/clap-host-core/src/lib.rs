@@ -11,3 +11,5 @@ pub mod plugin_gui;
 pub mod preset;
 pub mod scan;
 pub mod state;
+#[cfg(windows)]
+pub mod win32_embed;
