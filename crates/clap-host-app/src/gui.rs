@@ -199,19 +199,21 @@ pub fn run(
     )));
 
     let in_devices = audio::input_devices();
+    // Row 0 is "(none)" — the plugin's audio inputs get silence.
     ui.set_audio_in_devices(ModelRc::new(VecModel::from(
-        in_devices.iter().map(SharedString::from).collect::<Vec<_>>(),
+        std::iter::once(SharedString::from("(none)"))
+            .chain(in_devices.iter().map(SharedString::from))
+            .collect::<Vec<_>>(),
     )));
     // Only plugins with audio *input* ports consume a capture device.
     ui.set_has_audio_in(!loader::audio_port_channels(plugin, true).is_empty());
-    if let Some(i) = host
+    let in_idx = host
         .borrow()
         .input_name
         .as_deref()
         .and_then(|n| in_devices.iter().position(|d| d == n))
-    {
-        ui.set_audio_in_index(i as i32);
-    }
+        .map_or(0, |i| i + 1);
+    ui.set_audio_in_index(in_idx as i32);
 
     let params_model = Rc::new(VecModel::from(param_rows(&host.borrow())));
     ui.set_params(ModelRc::from(Rc::clone(&params_model)));
@@ -651,7 +653,12 @@ fn pick_audio_input(
     }
     let Some(ui) = ui_w.upgrade() else { return };
     ui.set_audio_in_index(index);
-    let in_name = ui.get_audio_in_devices().row_data(index as usize);
+    let in_name = if index <= 0 {
+        // Row 0 is "(none)" — silence into the plugin's audio inputs.
+        None
+    } else {
+        ui.get_audio_in_devices().row_data(index as usize)
+    };
     host.borrow_mut().input_name = in_name.as_deref().map(str::to_owned);
     // Keep the current output device; only the capture side switches.
     let out_name = ui

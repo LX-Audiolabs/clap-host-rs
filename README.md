@@ -44,7 +44,9 @@ clap-host-rs [--scan | --plugin <path.clap> [--id <clap-id>]
              [--list-midi] [--midi-in <name>]] [--list-devices]
 ```
 
-- `--scan` — walk the OS standard CLAP dirs and list found plugins.
+- `--scan` — walk the OS standard CLAP dirs and list found plugins. The
+  `CLAP_PATH` env var (`;`-separated on Windows, `:` elsewhere) adds extra
+  search dirs, per the CLAP spec.
 - `--list-devices` — list audio outputs, audio inputs and MIDI inputs.
 - `--plugin <path>` — open a plugin binary; plugins inside are listed.
   `--id <clap-id>` selects which one to instantiate when there are several.
@@ -108,9 +110,7 @@ Known gaps, roughly ordered by usefulness:
 - Transport/timeline (`clap_transport`) — the engine currently passes a null
   transport.
 - Multi-plugin graph with connections — the session owns exactly one plugin.
-- `CLAP_PATH` env var support in the scanner (spec) — only standard dirs are
-  scanned today.
-- Symlink-cycle guard and a `"(none)"` entry in the GUI input picker.
+- Symlink-cycle guard in the scanner (Windows junctions can loop).
 - Preset browser and parameter search in the GUI (presets are currently
   CLI-only via `--list-presets`/`--pull-preset`).
 - Live `request_resize` handling for the embedded editor.

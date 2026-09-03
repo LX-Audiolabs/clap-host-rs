@@ -49,6 +49,9 @@ pub struct Engine {
     /// Index into `bufs` where output port 0 starts.
     main_out_offset: usize,
     events: EvList,
+    /// Param id → the plugin's `clap_param_info.cookie`, echoed back in param
+    /// events so the plugin can skip its id lookup. Looked up per event.
+    param_cookies: Vec<(u32, *mut core::ffi::c_void)>,
     midi_rx: Queue<RawMidi>,
     ui_rx: Queue<UiEvent>,
     dialect: Dialect,
@@ -128,6 +131,10 @@ impl Engine {
             main_out_channels,
             main_out_offset,
             events: EvList::with_capacity(256),
+            param_cookies: loader::params(plugin)
+                .iter()
+                .map(|p| (p.id, p.cookie))
+                .collect(),
             midi_rx,
             ui_rx,
             dialect: loader::note_dialect(plugin),
@@ -186,9 +193,21 @@ impl Engine {
         while let Some(msg) = self.midi_rx.pop() {
             self.events.push_midi(msg, self.dialect, 0);
         }
-        while let Some(ev) = self.ui_rx.pop() {
+        // Cap UI events per block: a burst (slider drag) spreads over several
+        // blocks instead of landing in one huge event list. Spec-legal, and it
+        // bounds the list size for plugins that mishandle bursts (Vital crash,
+        // see planning/optimization.md). The rest stays queued for later blocks.
+        for _ in 0..32 {
+            let Some(ev) = self.ui_rx.pop() else { break };
             match ev {
-                UiEvent::Param { id, value } => self.events.push_param(id, value, 0),
+                UiEvent::Param { id, value } => {
+                    let cookie = self
+                        .param_cookies
+                        .iter()
+                        .find(|(pid, _)| *pid == id)
+                        .map_or(ptr::null_mut(), |(_, c)| *c);
+                    self.events.push_param(id, value, cookie, 0);
+                }
                 UiEvent::Midi(msg) => self.events.push_midi(msg, self.dialect, 0),
             }
         }

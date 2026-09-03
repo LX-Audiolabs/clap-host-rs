@@ -216,8 +216,14 @@ pub fn flush_params(plugin: *const clap_plugin) {
 pub fn set_param(plugin: *const clap_plugin, id: clap_id, value: f64) -> Result<(), String> {
     let params = params_ext(plugin).ok_or("plugin has no clap.params extension")?;
     let flush = params.flush.ok_or("clap.params has no flush")?;
+    // Echo the plugin's own cookie back when we know it (self::params — the
+    // local `params` above is the extension vtable).
+    let cookie = self::params(plugin)
+        .iter()
+        .find(|p| p.id == id)
+        .map_or(std::ptr::null_mut(), |p| p.cookie);
     let mut evs = EvList::with_capacity(1);
-    evs.push_param(id, value, 0);
+    evs.push_param(id, value, cookie, 0);
     let in_ev = evs.as_input_events();
     let out_ev = sink_output_events();
     unsafe { flush(plugin, &raw const in_ev, &raw const out_ev) };
@@ -232,6 +238,9 @@ pub struct ParamInfo {
     pub min: f64,
     pub max: f64,
     pub value: f64,
+    /// The plugin's own cookie for this param (`clap_param_info.cookie`) —
+    /// echo it back in param events so the plugin can skip the id lookup.
+    pub cookie: *mut core::ffi::c_void,
 }
 
 /// Every non-hidden parameter, with its current value. Main thread only.
@@ -262,6 +271,7 @@ pub fn params(plugin: *const clap_plugin) -> Vec<ParamInfo> {
                 min: info.min_value,
                 max: info.max_value,
                 value: param_value(plugin, info.id).unwrap_or(f64::NAN),
+                cookie: info.cookie,
             })
         })
         .collect()

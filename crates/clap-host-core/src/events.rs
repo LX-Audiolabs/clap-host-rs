@@ -81,7 +81,9 @@ impl EvList {
         self.items.clear();
     }
 
-    pub fn push_param(&mut self, param_id: clap_id, value: f64, time: u32) {
+    /// `cookie` is the plugin's own `clap_param_info.cookie` for this param, if
+    /// the host knows it — echoing it back lets the plugin skip its id lookup.
+    pub fn push_param(&mut self, param_id: clap_id, value: f64, cookie: *mut c_void, time: u32) {
         self.items.push(EvStorage {
             param: clap_event_param_value {
                 header: header(
@@ -90,7 +92,7 @@ impl EvList {
                     time,
                 ),
                 param_id,
-                cookie: ptr::null_mut(),
+                cookie,
                 note_id: -1,
                 port_index: -1,
                 channel: -1,
@@ -222,7 +224,7 @@ mod tests {
     #[test]
     fn event_layout_and_dialect() {
         let mut l = EvList::with_capacity(8);
-        l.push_param(7, 0.25, 0);
+        l.push_param(7, 0.25, ptr::null_mut(), 0);
         l.push_midi([0x91, 60, 100], Dialect::Midi, 1);
         l.push_midi([0x91, 60, 100], Dialect::Clap, 2);
         l.push_midi([0x81, 60, 0], Dialect::Clap, 3);

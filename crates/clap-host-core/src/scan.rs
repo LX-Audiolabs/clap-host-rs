@@ -29,6 +29,17 @@ pub fn standard_dirs() -> Vec<PathBuf> {
             dirs.push(PathBuf::from(h).join(".clap"));
         }
     }
+    // CLAP spec: CLAP_PATH adds extra search dirs (`;`-separated on
+    // Windows, `:` on other platforms).
+    if let Ok(var) = std::env::var("CLAP_PATH") {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        dirs.extend(
+            var.split(sep)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+        );
+    }
     dirs
 }
 
