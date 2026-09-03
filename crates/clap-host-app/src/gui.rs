@@ -457,9 +457,15 @@ pub fn run(
                 ui.set_remote_page_count(count);
             }
             let rows = remote_rows(&host.borrow());
-            for (i, row) in rows.into_iter().enumerate() {
-                if remote_model.row_data(i).as_ref() != Some(&row) {
-                    remote_model.set_row_data(i, row);
+            // Pages can shrink or grow on a switch; set_row_data silently
+            // no-ops out of range, so resync the length before diff-updating.
+            if remote_model.row_count() != rows.len() {
+                remote_model.set_vec(rows);
+            } else {
+                for (i, row) in rows.into_iter().enumerate() {
+                    if remote_model.row_data(i).as_ref() != Some(&row) {
+                        remote_model.set_row_data(i, row);
+                    }
                 }
             }
 
