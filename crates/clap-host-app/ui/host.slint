@@ -198,15 +198,23 @@ export component HostWindow inherits Window {
                 border-color: HostTheme.outline-variant;
             }
 
-            // Absorbs any rounding slack so the header above keeps its size.
+            // Absorbs rounding slack in embedded mode only — when the param
+            // page is visible it must NOT eat the space the params want.
             Rectangle {
+                visible: root.editor-embedded;
                 vertical-stretch: 1;
             }
 
             // Param page — hidden while the plugin editor fills the window.
-            if !root.editor-embedded: VerticalLayout {
-                padding: 16px;
-                spacing: 12px;
+            // The wrapper claims the window's leftover height so the stretch
+            // chain reaches the params ScrollView (stretch does not propagate
+            // out of an `if` into the outer layout).
+            param-page := Rectangle {
+                visible: !root.editor-embedded;
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
 
                 Rectangle {
                     vertical-stretch: 1;
@@ -232,6 +240,7 @@ export component HostWindow inherits Window {
                         }
 
                         ScrollView {
+                            vertical-stretch: 1;
                             VerticalLayout {
                                 spacing: 6px;
                                 for p[i] in root.params: ParamSlider {
@@ -311,6 +320,7 @@ export component HostWindow inherits Window {
                     color: HostTheme.on-surface-variant;
                     font-size: 12px;
                     wrap: word-wrap;
+                }
                 }
             }
         }

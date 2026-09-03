@@ -346,15 +346,28 @@ pub fn run(
                                     ui.set_editor_width(w as f32 / scale);
                                     ui.set_editor_height(h_px as f32 / scale);
                                     ui.set_editor_embedded(true);
+                                    // Re-read now that the slot is visible, then
+                                    // grow the window to the slot's far edge plus
+                                    // a bottom slack — rounding at scale factors
+                                    // like 125 % otherwise clips the last pixels.
+                                    let y = (ui.get_editor_y() * scale).round() as i32;
                                     let cur = ui.window().size();
                                     let m = x as u32; // 8px margin, scale-adjusted
                                     h.editor_prev_size = Some(cur);
+                                    eprintln!(
+                                        "embed: work={work_w}x{work_h} slot=({x},{y}) editor={w}x{h_px} scale={scale} window={cur:?}"
+                                    );
                                     ui.window().set_size(slint::WindowSize::Physical(
                                         slint::PhysicalSize::new(
                                             (x as u32 + w + m).max(cur.width),
-                                            (y as u32 + h_px + m).max(cur.height),
+                                            // Extra bottom slack: some plugins
+                                            // (Surge XT) draw slightly taller
+                                            // than the size they report.
+                                            (y as u32 + h_px + m + m + m).max(cur.height),
                                         ),
                                     ));
+                                    let now = ui.window().size();
+                                    eprintln!("embed: window set {cur:?} -> {now:?} (socket {}x{h_px} at {x},{y})", w);
                                     h.gui = Some(PluginWindow::Embedded(embedded));
                                     ui.set_gui_open(true);
                                 }
