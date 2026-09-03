@@ -15,6 +15,9 @@ use clap_sys::{
         params::{
             CLAP_EXT_PARAMS, clap_host_params, clap_param_clear_flags, clap_param_rescan_flags,
         },
+        remote_controls::{
+            CLAP_EXT_REMOTE_CONTROLS, CLAP_EXT_REMOTE_CONTROLS_COMPAT, clap_host_remote_controls,
+        },
         state::{CLAP_EXT_STATE, clap_host_state},
         tail::{CLAP_EXT_TAIL, clap_host_tail},
         thread_check::{CLAP_EXT_THREAD_CHECK, clap_host_thread_check},
@@ -39,7 +42,7 @@ use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 // Host extensions — log + thread_check + gui + params + state + timer +
-// latency + tail + note-name.
+// latency + tail + note-name + remote-controls.
 // ---------------------------------------------------------------------------
 
 static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
@@ -98,6 +101,8 @@ static LATENCY_CHANGED: AtomicBool = AtomicBool::new(false);
 static TAIL_CHANGED: AtomicBool = AtomicBool::new(false);
 /// Set by `note_name.changed`; re-query the plugin's note names.
 static NOTE_NAME_CHANGED: AtomicBool = AtomicBool::new(false);
+/// Set by `remote_controls.changed` — the plugin's page list changed.
+static REMOTE_CONTROLS_DIRTY: AtomicBool = AtomicBool::new(false);
 
 /// Run the plugin's pending main-thread work. Call from the UI event loop.
 pub fn pump_main_thread(plugin: *const clap_plugin) {
@@ -139,6 +144,11 @@ pub fn take_tail_changed() -> bool {
 /// True once per `note_name.changed` from the plugin.
 pub fn take_note_name_changed() -> bool {
     NOTE_NAME_CHANGED.swap(false, Ordering::AcqRel)
+}
+
+/// True once per `remote_controls.changed` from the plugin.
+pub fn take_remote_controls_dirty() -> bool {
+    REMOTE_CONTROLS_DIRTY.swap(false, Ordering::AcqRel)
 }
 
 /// True once per `request_restart` from the plugin.
@@ -190,6 +200,14 @@ unsafe extern "C" fn host_tail_changed(_: *const clap_host) {
 
 unsafe extern "C" fn host_note_name_changed(_: *const clap_host) {
     NOTE_NAME_CHANGED.store(true, Ordering::Release);
+}
+
+unsafe extern "C" fn host_remote_controls_changed(_: *const clap_host) {
+    REMOTE_CONTROLS_DIRTY.store(true, Ordering::Release);
+}
+unsafe extern "C" fn host_remote_controls_suggest_page(_: *const clap_host, _: clap_id) {
+    // ponytail: no-op — we don't scroll-to-page a physical control surface;
+    // add an atomic + GUI honor-step if a plugin ever relies on it.
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +344,10 @@ static TAIL_EXT: clap_host_tail = clap_host_tail {
 static NOTE_NAME_EXT: clap_host_note_name = clap_host_note_name {
     changed: Some(host_note_name_changed),
 };
+static REMOTE_CONTROLS_EXT: clap_host_remote_controls = clap_host_remote_controls {
+    changed: Some(host_remote_controls_changed),
+    suggest_page: Some(host_remote_controls_suggest_page),
+};
 static THREAD_CHECK_EXT: clap_host_thread_check = clap_host_thread_check {
     is_main_thread: Some(host_is_main_thread),
     is_audio_thread: Some(host_is_audio_thread),
@@ -362,6 +384,9 @@ unsafe extern "C" fn host_get_extension(_: *const clap_host, id: *const c_char) 
     }
     if id == CLAP_EXT_NOTE_NAME {
         return ptr::from_ref(&NOTE_NAME_EXT).cast();
+    }
+    if id == CLAP_EXT_REMOTE_CONTROLS || id == CLAP_EXT_REMOTE_CONTROLS_COMPAT {
+        return ptr::from_ref(&REMOTE_CONTROLS_EXT).cast();
     }
     ptr::null()
 }
@@ -457,6 +482,10 @@ mod tests {
         unsafe { host_note_name_changed(ptr::null()) };
         assert!(take_note_name_changed());
         assert!(!take_note_name_changed());
+
+        unsafe { host_remote_controls_changed(ptr::null()) };
+        assert!(take_remote_controls_dirty());
+        assert!(!take_remote_controls_dirty());
     }
 
     #[test]
@@ -500,6 +529,8 @@ mod tests {
             CLAP_EXT_LATENCY,
             CLAP_EXT_TAIL,
             CLAP_EXT_NOTE_NAME,
+            CLAP_EXT_REMOTE_CONTROLS,
+            CLAP_EXT_REMOTE_CONTROLS_COMPAT,
         ] {
             assert!(!unsafe { get(host, id.as_ptr()) }.is_null(), "missing {id:?}");
         }
