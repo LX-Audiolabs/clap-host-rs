@@ -71,11 +71,11 @@ without `--plugin`.
 
 Slint window (`--gui`): a Setup dialog for audio/MIDI device selection —
 output and audio-input devices, sample rate, buffer size, MIDI port, applied
-immediately on every change — plus a scrollable parameter list with sliders, a
-computer-keyboard piano (focused window = playing), a toggle for the plugin's
-own window, and state save/load with a dirty indicator (the plugin's
-`state.mark_dirty` lights a dot; save/load use `<plugin-file>.state.bin` next
-to the plugin binary).
+immediately on every change — plus a filterable, scrollable parameter list
+with sliders, a computer-keyboard piano (focused window = playing), a toggle
+for the plugin's own window, and state save/load with a dirty indicator (the
+plugin's `state.mark_dirty` lights a dot; save/load use `<plugin-file>.state.bin`
+next to the plugin binary).
 Plugins exposing `clap.remote-controls` get a paging panel (page name +
 prev/next buttons) whose sliders mirror the plugin's parameter pages.
 
@@ -111,8 +111,8 @@ Known gaps, roughly ordered by usefulness:
   transport.
 - Multi-plugin graph with connections — the session owns exactly one plugin.
 - Symlink-cycle guard in the scanner (Windows junctions can loop).
-- Preset browser and parameter search in the GUI (presets are currently
-  CLI-only via `--list-presets`/`--pull-preset`).
+- Preset browser in the GUI (presets are currently CLI-only via
+  `--list-presets`/`--pull-preset`).
 - Live `request_resize` handling for the embedded editor.
 - Editor embedding on macOS/Linux (currently Windows-only).
 - Channel routing: pick a channel pair on many-channel interfaces instead of

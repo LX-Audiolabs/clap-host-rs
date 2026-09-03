@@ -106,6 +106,16 @@ fn param_rows(host: &Host) -> Vec<ParamRow> {
         .collect()
 }
 
+/// `param_rows` narrowed to params whose name contains `filter`
+/// (case-insensitive, trimmed). An empty filter returns everything.
+fn param_rows_filtered(host: &Host, filter: &str) -> Vec<ParamRow> {
+    let f = filter.trim().to_lowercase();
+    param_rows(host)
+        .into_iter()
+        .filter(|r| f.is_empty() || r.name.as_str().to_lowercase().contains(&f))
+        .collect()
+}
+
 /// ParamRows for the current remote-controls page; params the plugin did not
 /// expose in its regular param list are skipped.
 fn remote_rows(host: &Host) -> Vec<ParamRow> {
@@ -451,6 +461,7 @@ pub fn run(
         let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
         let params_model = Rc::clone(&params_model);
         let remote_model = Rc::clone(&remote_model);
+        let mut last_filter = SharedString::new();
         timer.start(slint::TimerMode::Repeated, POLL, move || {
             let Some(ui) = ui_w.upgrade() else { return };
             pump_main_thread(host.borrow().plugin());
@@ -501,7 +512,14 @@ pub fn run(
 
             // ponytail: polling get_value instead of reading the plugin's output
             // events; 20 Hz is enough for sliders and needs no return queue.
-            let rows = param_rows(&host.borrow());
+            let filter = ui.get_param_filter();
+            if filter != last_filter {
+                // Filter changed: rebuild (set_vec) so shrinking filters
+                // actually drop rows — the diff loop below never truncates.
+                params_model.set_vec(param_rows_filtered(&host.borrow(), &filter));
+                last_filter = filter;
+            }
+            let rows = param_rows_filtered(&host.borrow(), &last_filter);
             for (i, row) in rows.into_iter().enumerate() {
                 if params_model.row_data(i).as_ref() != Some(&row) {
                     params_model.set_row_data(i, row);

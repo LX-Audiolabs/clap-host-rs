@@ -1,5 +1,6 @@
 //! CLAP plugin scanner: OS standard search paths.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// OS-standard CLAP search directories (per CLAP spec).
@@ -44,13 +45,25 @@ pub fn standard_dirs() -> Vec<PathBuf> {
 }
 
 /// Recursively collect `*.clap` files under `dir` (missing dir → empty).
+/// Directory links are followed, but each canonical directory is visited at
+/// most once, so symlink/junction cycles terminate.
 pub fn scan_dir(dir: &Path) -> Vec<PathBuf> {
+    scan_dir_inner(dir, &mut HashSet::new())
+}
+
+fn scan_dir_inner(dir: &Path, visited: &mut HashSet<PathBuf>) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    // Canonicalize to catch loops through links; an unreadable dir behaves
+    // like a missing one (empty result).
+    let Ok(canonical) = std::fs::canonicalize(dir) else { return out };
+    if !visited.insert(canonical) {
+        return out;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else { return out };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            out.extend(scan_dir(&path));
+            out.extend(scan_dir_inner(&path, visited));
         } else if path.extension().is_some_and(|e| e == "clap") {
             out.push(path);
         }
@@ -89,5 +102,21 @@ mod tests {
     #[test]
     fn standard_dirs_has_entries_on_all_platforms() {
         assert!(!standard_dirs().is_empty());
+    }
+
+    /// A symlink pointing back at an ancestor dir must not loop forever.
+    #[cfg(unix)]
+    #[test]
+    fn scan_dir_terminates_on_symlink_cycles() {
+        let root = std::env::temp_dir().join("clap-host-rs-scan-cycle-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/a.clap"), b"").unwrap();
+        std::os::unix::fs::symlink(&root, root.join("sub/loop")).unwrap();
+        let mut found = scan_dir(&root);
+        found.sort();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].ends_with("sub/a.clap"));
+        std::fs::remove_dir_all(&root).ok();
     }
 }

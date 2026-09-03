@@ -5,7 +5,7 @@
 import { HostTheme } from "theme.slint";
 import { ParamSlider } from "widgets.slint";
 import { SetupDialog } from "setup.slint";
-import { Button, ScrollView } from "std-widgets.slint";
+import { Button, LineEdit, ScrollView } from "std-widgets.slint";
 
 // The dialog is its own window, compiled in via the import above; re-export
 // so the generated Rust exposes both window types from this one compile unit.
@@ -35,6 +35,7 @@ export component HostWindow inherits Window {
     in property <bool> gui-available: false;
     in property <bool> gui-open: false;
     in property <[ParamRow]> params: [];
+    in-out property <string> param-filter: "";
     in property <[string]> audio-devices: [];
     in property <[string]> audio-in-devices: [];
     in property <[string]> midi-ports: [];
@@ -222,6 +223,12 @@ export component HostWindow inherits Window {
                             text: root.params.length > 0 ? "Parameters" : "No parameters";
                             color: HostTheme.on-surface-variant;
                             font-size: HostTheme.font-label;
+                        }
+
+                        LineEdit {
+                            text <=> root.param-filter;
+                            placeholder-text: "Filter parameters…";
+                            visible: root.params.length > 0;
                         }
 
                         ScrollView {
