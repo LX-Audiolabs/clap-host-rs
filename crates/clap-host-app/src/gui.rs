@@ -43,13 +43,9 @@ enum PluginWindow {
     Embedded(clap_host_core::win32_embed::EmbeddedGui),
 }
 
-/// Where the embedded plugin socket sits in our window's client area (physical
-/// px). The window grows to make room for it after a successful open.
-#[cfg(windows)]
-const EMBED_X: i32 = 16;
-#[cfg(windows)]
-const EMBED_Y: i32 = 480;
-
+/// Where the embedded plugin socket sits comes from the Slint side: the
+/// `editor-x`/`editor-y` properties (physical px after scale conversion) point
+/// 8px inside the reserved `editor-slot` rectangle in `host.slint`.
 /// Raw HWND of our own top-level window, to embed a plugin's GUI into.
 #[cfg(windows)]
 fn parent_hwnd(ui: &HostWindow) -> Option<windows_sys::Win32::Foundation::HWND> {
@@ -78,6 +74,9 @@ struct Host {
     /// Remote-controls pages (empty = plugin has no clap.remote-controls).
     remote_pages: Vec<clap_host_core::remote_controls::PageInfo>,
     remote_page: usize,
+    /// Window size before the embedded editor enlarged it; restored on close.
+    #[cfg(windows)]
+    editor_prev_size: Option<slint::PhysicalSize>,
     /// Fixed state path: the plugin file with a `.state.bin` suffix.
     state_path: PathBuf,
 }
@@ -171,6 +170,8 @@ pub fn run(
             Vec::new()
         },
         remote_page: 0,
+        #[cfg(windows)]
+        editor_prev_size: None,
         state_path,
     }));
 
@@ -288,6 +289,13 @@ pub fn run(
             let mut h = host.borrow_mut();
             if h.gui.take().is_some() {
                 ui.set_gui_open(false);
+                #[cfg(windows)]
+                if let Some(prev) = h.editor_prev_size.take() {
+                    // Embedded editor: swap the editor slot back to the param
+                    // page and restore the window size from before it opened.
+                    ui.set_editor_embedded(false);
+                    ui.window().set_size(slint::WindowSize::Physical(prev));
+                }
                 return;
             }
             let plugin = h.plugin();
@@ -299,28 +307,44 @@ pub fn run(
                 }
                 Err(float_err) => {
                     #[cfg(windows)]
-                    if clap_host_core::win32_embed::supports_embedded(plugin)
-                        && let Some(parent) = parent_hwnd(&ui)
                     {
-                        match clap_host_core::win32_embed::EmbeddedGui::open(
-                            plugin, parent, EMBED_X, EMBED_Y,
-                        ) {
-                            Ok(embedded) => {
-                                let (w, h_px) = embedded.size();
-                                let cur = ui.window().size();
-                                ui.window().set_size(slint::WindowSize::Physical(
-                                    slint::PhysicalSize::new(
-                                        cur.width.max(EMBED_X as u32 + w + 16),
-                                        cur.height.max(EMBED_Y as u32 + h_px + 16),
-                                    ),
-                                ));
-                                h.gui = Some(PluginWindow::Embedded(embedded));
-                                ui.set_gui_open(true);
-                            }
-                            Err(embed_err) => {
-                                ui.set_log_text(SharedString::from(format!(
-                                    "plugin GUI: {float_err}; embed: {embed_err}"
-                                )));
+                        use clap_host_core::win32_embed as embed;
+                        if embed::supports_embedded(plugin)
+                            && let Some(parent) = parent_hwnd(&ui)
+                        {
+                            // Swap the param page for the editor slot: the
+                            // socket goes 8px inside it, at editor-x/editor-y.
+                            let scale = ui.window().scale_factor();
+                            let x = (ui.get_editor_x() * scale).round() as i32;
+                            let y = (ui.get_editor_y() * scale).round() as i32;
+                            // Cap the editor to the monitor's work area; the
+                            // shrink negotiation happens inside open(), after
+                            // gui.create, once the plugin answers truthfully.
+                            let (work_w, work_h) = embed::monitor_work_area(parent);
+                            let max_w = (work_w - x - 8).max(200) as u32;
+                            let max_h = (work_h - y - 8).max(200) as u32;
+                            match embed::EmbeddedGui::open(plugin, parent, x, y, Some((max_w, max_h))) {
+                                Ok((embedded, (w, h_px))) => {
+                                    ui.set_editor_width(w as f32 / scale);
+                                    ui.set_editor_height(h_px as f32 / scale);
+                                    ui.set_editor_embedded(true);
+                                    let cur = ui.window().size();
+                                    let m = x as u32; // 8px margin, scale-adjusted
+                                    h.editor_prev_size = Some(cur);
+                                    ui.window().set_size(slint::WindowSize::Physical(
+                                        slint::PhysicalSize::new(
+                                            (x as u32 + w + m).max(cur.width),
+                                            (y as u32 + h_px + m).max(cur.height),
+                                        ),
+                                    ));
+                                    h.gui = Some(PluginWindow::Embedded(embedded));
+                                    ui.set_gui_open(true);
+                                }
+                                Err(embed_err) => {
+                                    ui.set_log_text(SharedString::from(format!(
+                                        "plugin GUI: {float_err}; embed: {embed_err}"
+                                    )));
+                                }
                             }
                         }
                     }
@@ -424,7 +448,13 @@ pub fn run(
             pump_main_thread(host.borrow().plugin());
 
             if take_gui_closed() {
-                host.borrow_mut().gui = None;
+                let mut h = host.borrow_mut();
+                h.gui = None;
+                #[cfg(windows)]
+                if let Some(prev) = h.editor_prev_size.take() {
+                    ui.set_editor_embedded(false);
+                    ui.window().set_size(slint::WindowSize::Physical(prev));
+                }
                 ui.set_gui_open(false);
             }
             if take_restart_request() {

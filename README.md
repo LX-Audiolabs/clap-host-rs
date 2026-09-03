@@ -2,7 +2,10 @@
 
 Standalone CLAP host in Rust: load a `.clap`/`.dll` plugin, drive it with MIDI, and output audio — via CLI or a small Slint GUI.
 
-Status: pre-alpha. One plugin per process; no plugin graph yet.
+Status: pre-alpha. One plugin per process; no plugin graph yet. The
+implementation plan and GUI follow-ups in `planning/` are fully implemented
+(see the "Umsetzungsstand" section at the top of each plan); deferred items
+are listed under Follow-ups below.
 
 ## Build & test
 
@@ -47,13 +50,18 @@ without `--plugin`.
 
 Slint window (`--gui`): a Setup dialog for audio/MIDI device selection, a
 scrollable parameter list with sliders, a computer-keyboard piano (focused
-window = playing), a toggle for the plugin's floating window, and state
+window = playing), a toggle for the plugin's own window, and state
 save/load with a dirty indicator (the plugin's `state.mark_dirty` lights a
 dot; save/load use `<plugin-file>.state.bin` next to the plugin binary).
-If the plugin only supports an embedded GUI, the editor opens inside the
-host window instead (Windows). Plugins exposing `clap.remote-controls`
-get a paging panel (page name + prev/next buttons) whose sliders mirror
-the plugin's parameter pages.
+Plugins exposing `clap.remote-controls` get a paging panel (page name +
+prev/next buttons) whose sliders mirror the plugin's parameter pages.
+
+Plugin GUI toggle behavior is Reaper-style: opening the editor swaps the
+parameter page for the plugin's own UI — only the plugin window plus the
+host's top bar (save/load/setup buttons, status) stays visible. If the
+plugin can't float, its editor is embedded into the host window (Windows);
+the editor is capped to the monitor's work area if the plugin asks for more,
+and the host window's previous size is restored when the editor closes.
 
 ## Architecture
 
@@ -63,8 +71,9 @@ Two crates:
   host callbacks (`loader`, `host`), the cpal audio session (`audio`,
   `start_processing`/`stop_processing` run on the audio thread), lock-free
   MIDI/UI event queues (`events`), MIDI input (`midi`), floating plugin
-  window helper (`plugin_gui`), preset discovery (`preset`), standard-dir
-  scanner (`scan`) and plugin state save/load (`state`).
+  window helper (`plugin_gui`), preset discovery (`preset`), remote-controls
+  paging helper (`remote_controls`), Win32 editor embedding (`win32_embed`),
+  standard-dir scanner (`scan`) and plugin state save/load (`state`).
 - `clap-host-app` — the binary: simple CLI parsing, `main` flow and the Slint
   GUI (`ui/*.slint`, `gui.rs`). The app handles printing and process lifetime;
   the core remains library-clean.
@@ -81,3 +90,7 @@ Known gaps, roughly ordered by usefulness:
 - `CLAP_PATH` env var support in the scanner (spec) — only standard dirs are
   scanned today.
 - Symlink-cycle guard and a `"(none)"` entry in the GUI input picker.
+- Preset browser and parameter search in the GUI (presets are currently
+  CLI-only via `--list-presets`/`--pull-preset`).
+- Live `request_resize` handling for the embedded editor.
+- Editor embedding on macOS/Linux (currently Windows-only).

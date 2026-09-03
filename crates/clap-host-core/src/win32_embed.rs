@@ -18,9 +18,13 @@ use std::sync::OnceLock;
 use clap_sys::ext::gui::{CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32, clap_plugin_gui, clap_window};
 use clap_sys::plugin::clap_plugin;
 use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, WNDCLASSW, WS_CHILD, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, WNDCLASSW, SM_CXSCREEN,
+    SM_CYSCREEN, WS_CHILD, WS_VISIBLE,
 };
 use windows_sys::core::PCWSTR;
 
@@ -37,6 +41,50 @@ pub fn supports_embedded(plugin: *const clap_plugin) -> bool {
         g.is_api_supported
             .is_some_and(|f| unsafe { f(plugin, CLAP_WINDOW_API_WIN32.as_ptr(), false) })
     })
+}
+
+/// The plugin's preferred editor size (`gui.get_size`), 400x300 fallback.
+#[must_use]
+pub fn preferred_size(plugin: *const clap_plugin) -> (u32, u32) {
+    let mut size = (400u32, 300u32);
+    if let Some(get_size) = gui_ext(plugin).and_then(|g| g.get_size) {
+        let (mut w, mut h) = (0u32, 0u32);
+        if unsafe { get_size(plugin, &raw mut w, &raw mut h) } && w > 0 && h > 0 {
+            size = (w, h);
+        }
+    }
+    size
+}
+
+/// Ask the plugin to resize its editor. May be refused; re-read with
+/// [`preferred_size`] afterwards to learn the size the plugin actually took.
+#[must_use]
+pub fn request_size(plugin: *const clap_plugin, width: u32, height: u32) -> bool {
+    gui_ext(plugin)
+        .and_then(|g| g.set_size)
+        .is_some_and(|f| unsafe { f(plugin, width, height) })
+}
+
+/// Size of the monitor `hwnd` sits on (work area = screen minus taskbar),
+/// physical px. Falls back to the primary screen's full size.
+#[must_use]
+pub fn monitor_work_area(hwnd: HWND) -> (i32, i32) {
+    unsafe {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            rcMonitor: Default::default(),
+            rcWork: Default::default(),
+            dwFlags: 0,
+        };
+        if !monitor.is_null() && GetMonitorInfoW(monitor, &raw mut info) != 0 {
+            return (
+                info.rcWork.right - info.rcWork.left,
+                info.rcWork.bottom - info.rcWork.top,
+            );
+        }
+        (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+    }
 }
 
 /// Window class for the plain socket window the plugin embeds into. Registered
@@ -73,10 +121,21 @@ pub struct EmbeddedGui {
 }
 
 impl EmbeddedGui {
-    /// Create the socket at `(x, y)` in `parent`'s client coordinates, sized to
-    /// the plugin's own preferred size (`gui.get_size`, falling back to
-    /// `400x300`), and embed the plugin into it. Main thread only.
-    pub fn open(plugin: *const clap_plugin, parent: HWND, x: i32, y: i32) -> Result<Self, String> {
+    /// Create the plugin's editor, cap its size to `max_size` (asking the
+    /// plugin to shrink via `gui.set_size` if its preferred size doesn't
+    /// fit), then create the socket at `(x, y)` in `parent`'s client
+    /// coordinates and embed the plugin into it. Returns the embedded GUI and
+    /// the editor size the socket was actually created with. Main thread only.
+    ///
+    /// Size negotiation happens *after* `gui.create` — some plugins (Vital)
+    /// only answer `gui.get_size` truthfully once created.
+    pub fn open(
+        plugin: *const clap_plugin,
+        parent: HWND,
+        x: i32,
+        y: i32,
+        max_size: Option<(u32, u32)>,
+    ) -> Result<(Self, (u32, u32)), String> {
         let gui = gui_ext(plugin).ok_or("plugin has no clap.gui extension")?;
         if !supports_embedded(plugin) {
             return Err("plugin does not support embedded (non-floating) GUIs".into());
@@ -86,12 +145,16 @@ impl EmbeddedGui {
             return Err("gui.create returned false".into());
         }
 
-        let (mut w, mut h) = (400u32, 300u32);
-        if let Some(get_size) = gui.get_size {
-            let (mut gw, mut gh) = (0u32, 0u32);
-            if unsafe { get_size(plugin, &raw mut gw, &raw mut gh) } && gw > 0 && gh > 0 {
-                (w, h) = (gw, gh);
-            }
+        let (mut w, mut h) = preferred_size(plugin);
+        if let Some((max_w, max_h)) = max_size
+            && (w > max_w || h > max_h)
+        {
+            w = w.min(max_w);
+            h = h.min(max_h);
+            let _accepted = request_size(plugin, w, h);
+            let (nw, nh) = preferred_size(plugin);
+            w = nw.min(max_w);
+            h = nh.min(max_h);
         }
 
         let socket = unsafe {
@@ -141,7 +204,7 @@ impl EmbeddedGui {
             return Err("gui.show returned false".into());
         }
 
-        Ok(Self { plugin, socket })
+        Ok((Self { plugin, socket }, (w, h)))
     }
 
     /// The socket's current size in physical pixels.

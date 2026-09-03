@@ -50,6 +50,13 @@ export component HostWindow inherits Window {
     in property <int> remote-page: 0;
     in property <int> remote-page-count: 0;
     in property <[ParamRow]> remote-params: [];
+    // Embedded plugin editor: gui.rs swaps the param page for this slot and
+    // places the Win32 socket HWND at (editor-x, editor-y), physical px.
+    in property <bool> editor-embedded: false;
+    in property <length> editor-width: 0px;
+    in property <length> editor-height: 0px;
+    out property <length> editor-x;
+    out property <length> editor-y;
 
     callback param-changed(int, float);
     callback remote-prev();
@@ -109,8 +116,11 @@ export component HostWindow inherits Window {
                 background: HostTheme.primary;
             }
 
+            // Top bar — stays visible while the plugin editor fills the rest.
             VerticalLayout {
+                vertical-stretch: 0;
                 padding: 16px;
+                padding-bottom: 6px;
                 spacing: 12px;
 
                 HorizontalLayout {
@@ -174,6 +184,28 @@ export component HostWindow inherits Window {
                         visible: root.midi-status != "";
                     }
                 }
+            }
+
+            // Reserved client area for the embedded plugin HWND.
+            editor-slot := Rectangle {
+                visible: root.editor-embedded;
+                vertical-stretch: 0;
+                height: root.editor-embedded ? root.editor-height + 16px : 0px;
+                background: HostTheme.surface-container;
+                border-radius: HostTheme.radius-md;
+                border-width: 1px;
+                border-color: HostTheme.outline-variant;
+            }
+
+            // Absorbs any rounding slack so the header above keeps its size.
+            Rectangle {
+                vertical-stretch: 1;
+            }
+
+            // Param page — hidden while the plugin editor fills the window.
+            if !root.editor-embedded: VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
 
                 Rectangle {
                     vertical-stretch: 1;
@@ -276,4 +308,9 @@ export component HostWindow inherits Window {
             }
         }
     }
+
+    // Where gui.rs places the embedded plugin's HWND (physical px after the
+    // scale-factor conversion there): 8px inside the reserved slot.
+    editor-x: editor-slot.x + 8px;
+    editor-y: editor-slot.y + 8px;
 }
