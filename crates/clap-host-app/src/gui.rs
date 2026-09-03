@@ -150,6 +150,8 @@ pub fn run(
     plugin_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ui = HostWindow::new()?;
+    // Hidden until the Setup button shows it; lives as long as `ui`.
+    let setup = SetupDialog::new()?;
 
     let mut state_path = plugin_path.to_path_buf();
     state_path.as_mut_os_string().push(".state.bin");
@@ -233,6 +235,18 @@ pub fn run(
         }
     }
 
+    // Mirror the pickers into the Setup dialog: the models are shared
+    // (`ModelRc` clones), the indices are copies both windows write back to
+    // each other. The main window keeps its copies — the restart path below
+    // reads `ui.get_audio_devices()` / `ui.get_audio_index()`.
+    setup.set_audio_devices(ui.get_audio_devices());
+    setup.set_audio_in_devices(ui.get_audio_in_devices());
+    setup.set_midi_ports(ui.get_midi_ports());
+    setup.set_has_audio_in(ui.get_has_audio_in());
+    setup.set_audio_index(ui.get_audio_index());
+    setup.set_audio_in_index(ui.get_audio_in_index());
+    setup.set_midi_index(ui.get_midi_index());
+
     {
         let host = Rc::clone(&host);
         ui.on_param_changed(move |id, value| {
@@ -256,39 +270,17 @@ pub fn run(
         ui.on_note_off(move |key| push_note(&host.borrow(), 0x80, key));
     }
     {
-        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
-        ui.on_audio_device_changed(move |index| {
+        let (ui_w, setup_w) = (ui.as_weak(), setup.as_weak());
+        ui.on_open_setup(move || {
             let Some(ui) = ui_w.upgrade() else { return };
-            let name = ui.get_audio_devices().row_data(index as usize);
-            start_audio(&ui, &host, name.as_deref());
+            let Some(setup) = setup_w.upgrade() else { return };
+            if let Err(e) = setup.show() {
+                ui.set_log_text(SharedString::from(format!("setup dialog: {e}")));
+            }
+            setup.window().request_redraw();
         });
     }
-    {
-        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
-        ui.on_audio_in_changed(move |index| {
-            let Some(ui) = ui_w.upgrade() else { return };
-            let in_name = ui.get_audio_in_devices().row_data(index as usize);
-            host.borrow_mut().input_name = in_name.as_deref().map(str::to_owned);
-            // Keep the current output device; only the capture side switches.
-            let out_name = ui
-                .get_audio_devices()
-                .row_data(ui.get_audio_index().max(0) as usize);
-            start_audio(&ui, &host, out_name.as_deref());
-        });
-    }
-    {
-        let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
-        ui.on_midi_port_changed(move |index| {
-            let Some(ui) = ui_w.upgrade() else { return };
-            // Row 0 is "(none)".
-            let name = if index <= 0 {
-                None
-            } else {
-                ui.get_midi_ports().row_data(index as usize)
-            };
-            start_midi(&ui, &host, name.as_deref());
-        });
-    }
+    wire_device_callbacks(&ui, &setup, &host);
     {
         let (host, ui_w) = (Rc::clone(&host), ui.as_weak());
         ui.on_toggle_gui(move || {
@@ -487,6 +479,98 @@ pub fn run(
     h.session = None;
     h.midi_conn = None;
     Ok(())
+}
+
+/// Wire the three device callbacks on BOTH the main window and the Setup
+/// dialog. Identical handler logic on either side; each firing syncs the
+/// index to both windows before running the same switch as before.
+fn wire_device_callbacks(ui: &HostWindow, setup: &SetupDialog, host: &Rc<RefCell<Host>>) {
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        ui.on_audio_device_changed(move |index| pick_output_device(&ui_w, &setup_w, &host, index));
+    }
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        setup.on_audio_device_changed(move |index| pick_output_device(&ui_w, &setup_w, &host, index));
+    }
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        ui.on_audio_in_changed(move |index| pick_audio_input(&ui_w, &setup_w, &host, index));
+    }
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        setup.on_audio_in_changed(move |index| pick_audio_input(&ui_w, &setup_w, &host, index));
+    }
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        ui.on_midi_port_changed(move |index| pick_midi_port(&ui_w, &setup_w, &host, index));
+    }
+    {
+        let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
+        setup.on_midi_port_changed(move |index| pick_midi_port(&ui_w, &setup_w, &host, index));
+    }
+}
+
+/// Output-device pick: restart audio on the chosen device. The device models
+/// and status lines live on the main window, so the handler reads them there
+/// regardless of which window's picker fired.
+fn pick_output_device(
+    ui_w: &slint::Weak<HostWindow>,
+    setup_w: &slint::Weak<SetupDialog>,
+    host: &Rc<RefCell<Host>>,
+    index: i32,
+) {
+    if let Some(setup) = setup_w.upgrade() {
+        setup.set_audio_index(index);
+    }
+    let Some(ui) = ui_w.upgrade() else { return };
+    // No-op when the main window's own (now hidden) picker fired — the
+    // two-way binding already set it — but the dialog path needs this write.
+    ui.set_audio_index(index);
+    let name = ui.get_audio_devices().row_data(index as usize);
+    start_audio(&ui, host, name.as_deref());
+}
+
+/// Audio-input pick: switch the capture side, keeping the current output.
+fn pick_audio_input(
+    ui_w: &slint::Weak<HostWindow>,
+    setup_w: &slint::Weak<SetupDialog>,
+    host: &Rc<RefCell<Host>>,
+    index: i32,
+) {
+    if let Some(setup) = setup_w.upgrade() {
+        setup.set_audio_in_index(index);
+    }
+    let Some(ui) = ui_w.upgrade() else { return };
+    ui.set_audio_in_index(index);
+    let in_name = ui.get_audio_in_devices().row_data(index as usize);
+    host.borrow_mut().input_name = in_name.as_deref().map(str::to_owned);
+    // Keep the current output device; only the capture side switches.
+    let out_name = ui
+        .get_audio_devices()
+        .row_data(ui.get_audio_index().max(0) as usize);
+    start_audio(&ui, host, out_name.as_deref());
+}
+
+/// MIDI-port pick; row 0 is "(none)".
+fn pick_midi_port(
+    ui_w: &slint::Weak<HostWindow>,
+    setup_w: &slint::Weak<SetupDialog>,
+    host: &Rc<RefCell<Host>>,
+    index: i32,
+) {
+    if let Some(setup) = setup_w.upgrade() {
+        setup.set_midi_index(index);
+    }
+    let Some(ui) = ui_w.upgrade() else { return };
+    ui.set_midi_index(index);
+    // Row 0 is "(none)".
+    let name = if index <= 0 {
+        None
+    } else {
+        ui.get_midi_ports().row_data(index as usize)
+    };
+    start_midi(&ui, host, name.as_deref());
 }
 
 fn push_note(host: &Host, status: u8, key: i32) {
