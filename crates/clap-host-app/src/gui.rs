@@ -17,6 +17,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use clap_host_core::audio::{self, Session};
+use clap_host_core::clap_sys::id::clap_id;
 use clap_host_core::clap_sys::plugin::clap_plugin;
 use clap_host_core::events::{self, PluginOutEvent, Queue, RawMidi, UiEvent};
 use clap_host_core::host::{
@@ -70,8 +71,11 @@ struct Host {
     midi_q: Queue<RawMidi>,
     ui_q: Queue<UiEvent>,
     /// Plugin → host param events, filled by the audio thread; drained by the
-    /// UI poll (Task 4).
+    /// UI timer (primary path for plugin-driven param changes).
     out_q: Queue<PluginOutEvent>,
+    /// Param ids with an in-flight plugin-side gesture (from output events).
+    /// v1 keeps this only as bookkeeping — it does not block host slider writes.
+    adjusting: std::collections::HashSet<clap_id>,
     session: Option<Session>,
     /// Sample rate / buffer size overrides chosen in the Setup dialog.
     settings: audio::StreamSettings,
@@ -141,6 +145,68 @@ fn remote_rows(host: &Host) -> Vec<ParamRow> {
                 maximum: p.max as f32,
                 text: SharedString::from(loader::param_text(host.plugin(), p.id, value)),
             }
+        })
+        .collect()
+}
+
+/// Drain plugin→host param events: refresh cached values and gesture set.
+/// Returns true if any `Value` was applied (models should diff-update).
+fn apply_out_events(host: &mut Host) -> bool {
+    let mut changed = false;
+    while let Some(ev) = host.out_q.pop() {
+        match ev {
+            PluginOutEvent::Value { id, value } => {
+                if let Some(p) = host.params.iter_mut().find(|p| p.id == id) {
+                    p.value = value;
+                    changed = true;
+                }
+            }
+            PluginOutEvent::GestureBegin { id } => {
+                host.adjusting.insert(id);
+            }
+            PluginOutEvent::GestureEnd { id } => {
+                host.adjusting.remove(&id);
+            }
+        }
+    }
+    changed
+}
+
+/// `param_rows_filtered` built purely from the cached `p.value` — no
+/// `param_value` call. Used right after an out-event apply so the models sync
+/// to the event value without waiting for `get_value` to catch up.
+fn param_rows_from_cache_filtered(host: &Host, filter: &str) -> Vec<ParamRow> {
+    let f = filter.trim().to_lowercase();
+    host.params
+        .iter()
+        .filter(|p| f.is_empty() || p.name.to_lowercase().contains(&f))
+        .map(|p| ParamRow {
+            id: p.id as i32,
+            name: SharedString::from(&p.name),
+            value: p.value as f32,
+            minimum: p.min as f32,
+            maximum: p.max as f32,
+            text: SharedString::from(loader::param_text(host.plugin(), p.id, p.value)),
+        })
+        .collect()
+}
+
+/// `remote_rows` built purely from the cached `p.value` — see
+/// `param_rows_from_cache_filtered`.
+fn remote_rows_from_cache(host: &Host) -> Vec<ParamRow> {
+    let Some(page) = host.remote_pages.get(host.remote_page) else {
+        return Vec::new();
+    };
+    page.params
+        .iter()
+        .filter_map(|&id| host.params.iter().find(|p| p.id == id))
+        .map(|p| ParamRow {
+            id: p.id as i32,
+            name: SharedString::from(&p.name),
+            value: p.value as f32,
+            minimum: p.min as f32,
+            maximum: p.max as f32,
+            text: SharedString::from(loader::param_text(host.plugin(), p.id, p.value)),
         })
         .collect()
 }
@@ -248,6 +314,7 @@ pub fn run(
         midi_q: events::queue(),
         ui_q: events::queue(),
         out_q: events::queue(),
+        adjusting: std::collections::HashSet::new(),
         session: None,
         settings,
         gui: None,
@@ -592,6 +659,33 @@ pub fn run(
             let Some(ui) = ui_w.upgrade() else { return };
             pump_main_thread(host.borrow().plugin());
 
+            // Plugin→host output events are the primary path for plugin-driven
+            // param changes. Drain first (borrow_mut scope), then sync the
+            // models from the refreshed cache without waiting for get_value.
+            let changed = {
+                let mut h = host.borrow_mut();
+                apply_out_events(&mut h)
+            };
+            if changed {
+                let filter = ui.get_param_filter();
+                let rows = param_rows_from_cache_filtered(&host.borrow(), filter.as_str());
+                for (i, row) in rows.into_iter().enumerate() {
+                    if params_model.row_data(i).as_ref() != Some(&row) {
+                        params_model.set_row_data(i, row);
+                    }
+                }
+                let rows = remote_rows_from_cache(&host.borrow());
+                if remote_model.row_count() != rows.len() {
+                    remote_model.set_vec(rows);
+                } else {
+                    for (i, row) in rows.into_iter().enumerate() {
+                        if remote_model.row_data(i).as_ref() != Some(&row) {
+                            remote_model.set_row_data(i, row);
+                        }
+                    }
+                }
+            }
+
             if take_gui_closed() {
                 let mut h = host.borrow_mut();
                 h.gui = None;
@@ -655,8 +749,9 @@ pub fn run(
                 }
             }
 
-            // ponytail: polling get_value instead of reading the plugin's output
-            // events; 20 Hz is enough for sliders and needs no return queue.
+            // ponytail: 20 Hz get_value poll as a fallback for plugins that
+            // change params without emitting output events; the out-event
+            // drain above is the primary path and syncs within one tick.
             let filter = ui.get_param_filter();
             if filter != last_filter {
                 // Filter changed: rebuild (set_vec) so shrinking filters
