@@ -188,7 +188,7 @@ fn apply_requested_resize(ui: &HostWindow, host: &Rc<RefCell<Host>>, w: u32, h: 
     // may want the space), with bottom slack for plugins that draw slightly
     // taller than they report.
     let cur = ui.window().size();
-    let m = (8.0 * scale).round() as u32;
+    let m = margin as u32;
     ui.window()
         .set_size(slint::WindowSize::Physical(slint::PhysicalSize::new(
             (x as u32 + aw + m).max(cur.width),
@@ -559,7 +559,7 @@ pub fn run(
                     ui.set_log_text(SharedString::from(format!("preset loaded: {}", file.display())));
                     drop(h);
                     // The plugin changed param values; refresh the model like
-                    // on_load_state does (gui.rs:463-464).
+                    // on_load_state does (gui.rs:537-538).
                     let filter = ui.get_param_filter();
                     params_model.set_vec(param_rows_filtered(&host.borrow(), filter.as_str()));
                 }
