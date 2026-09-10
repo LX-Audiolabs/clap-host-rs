@@ -82,6 +82,9 @@ plugin's `state.mark_dirty` lights a dot; save/load use `<plugin-file>.state.bin
 next to the plugin binary).
 Plugins exposing `clap.remote-controls` get a paging panel (page name +
 prev/next buttons) whose sliders mirror the plugin's parameter pages.
+Parameter changes made in the plugin's own editor are read back via the
+plugin's output-event list (`PARAM_VALUE`, gesture begin/end), so the host
+sliders follow the plugin UI.
 A "Load Preset…" button (native file dialog, enabled only when the plugin
 implements `clap.preset-load`) asks the plugin to load the chosen preset file
 itself; failures surface as a plugin message in the status/log.

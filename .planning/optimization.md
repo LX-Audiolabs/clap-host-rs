@@ -148,6 +148,13 @@ Fund aus Quellcode-Vergleich (`host/plugin-host.cc`, 2026-09-02):
   (`clap_host_preset_load` mit `loaded`/`on_error`), `load_file` im Core,
   CLI `--load-preset <file>` und GUI-Button "Load Preset…" (nativer
   Dateidialog, nur aktiv wenn das Plugin `clap.preset-load` implementiert).
+- **Output-Events (`clap_process.out_events` / `params.flush`)** — ✅ ERLEDIGT
+  (2026-09-10): Plugin→Host-Param-Feedback wurde bisher verworfen — Regler im
+  Plugin-Editor haben Host-Slider nicht aktualisiert. Jetzt: Core fängt
+  `PARAM_VALUE`/`GESTURE_BEGIN`/`GESTURE_END` aus den Output-Listen von
+  `process()` und `params.flush` in einer lock-free `PluginOutEvent`-Queue;
+  der GUI-Poll drained sie per Timer und spiegelt Werte in Param-Sliders und
+  Remote-Controls.
 - **Verweis:** `clap.thread-pool` und `clap.posix-fd-support` haben eigene
   Pläne unter `.superpowers/` — hier nicht weiter verfolgt.
 - **"Provide Cookie"-Toggle** — ✅ ERLEDIGT: `ParamInfo.cookie` wird aus

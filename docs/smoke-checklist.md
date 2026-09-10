@@ -71,3 +71,5 @@ Notation: `HOST` = `target/debug/clap-host-rs` (or `target/release/clap-host-rs`
 
 23. [ ] `cargo test --workspace` — all tests pass.
 24. [ ] `cargo clippy --workspace --all-targets -- -D warnings` — no warnings.
+25. [ ] **Param-Feedback**: Regler im Plugin-Editor bewegen → Host-Slider folgt
+        innerhalb ~50 ms.
