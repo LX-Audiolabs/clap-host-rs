@@ -20,7 +20,8 @@ use clap_host_core::audio::{self, Session};
 use clap_host_core::clap_sys::plugin::clap_plugin;
 use clap_host_core::events::{self, Queue, RawMidi, UiEvent};
 use clap_host_core::host::{
-    pump_main_thread, take_gui_closed, take_restart_request, take_state_dirty,
+    pump_main_thread, take_gui_closed, take_gui_hide_requested, take_gui_show_requested,
+    take_requested_resize, take_restart_request, take_state_dirty,
 };
 use clap_host_core::loader::{self, ParamInfo, PluginPtr};
 use clap_host_core::midi;
@@ -148,6 +149,74 @@ fn remote_nav(host: &Host) -> (SharedString, i32, i32) {
             host.remote_pages.len() as i32,
         ),
         None => (SharedString::new(), 0, 0),
+    }
+}
+
+/// Apply a plugin's `gui.request_resize` to the embedded editor slot: ask the
+/// plugin (it may refuse or pick another size), resize the socket to what it
+/// actually took, update the slot and grow our window to fit. Floating
+/// windows size themselves — a pending request with no embedded editor is
+/// dropped. Windows-only: only the Win32 path embeds.
+#[cfg(windows)]
+fn apply_requested_resize(ui: &HostWindow, host: &Rc<RefCell<Host>>, w: u32, h: u32) {
+    let hst = host.borrow();
+    let Some(PluginWindow::Embedded(embedded)) = hst.gui.as_ref() else {
+        return;
+    };
+    let scale = ui.window().scale_factor();
+    let x = (ui.get_editor_x() * scale).round() as i32;
+    let y = (ui.get_editor_y() * scale).round() as i32;
+    let Some(parent) = parent_hwnd(ui) else {
+        return;
+    };
+    let (work_w, work_h) = clap_host_core::win32_embed::monitor_work_area(parent);
+    // Same cap as the open path: editor must fit the monitor.
+    let margin = (8.0 * scale).round() as i32;
+    let max_w = (work_w - x - margin).max(200) as u32;
+    let max_h = (work_h - y - margin).max(200) as u32;
+    let (w, h) = (w.min(max_w), h.min(max_h));
+    // Ask first, then size the socket to the size the plugin actually took —
+    // identical negotiation to EmbeddedGui::open.
+    let _ = clap_host_core::win32_embed::request_size(hst.plugin(), w, h);
+    let (aw, ah) = clap_host_core::win32_embed::preferred_size(hst.plugin());
+    embedded.resize(aw, ah);
+    ui.set_editor_width(aw as f32 / scale);
+    ui.set_editor_height(ah as f32 / scale);
+    // Grow our window to the slot's far edge (never shrink — the params page
+    // may want the space), with bottom slack for plugins that draw slightly
+    // taller than they report.
+    let cur = ui.window().size();
+    let m = (8.0 * scale).round() as u32;
+    ui.window()
+        .set_size(slint::WindowSize::Physical(slint::PhysicalSize::new(
+            (x as u32 + aw + m).max(cur.width),
+            (y as u32 + ah + m * 3).max(cur.height),
+        )));
+}
+
+#[cfg(not(windows))]
+fn apply_requested_resize(_ui: &HostWindow, _host: &Rc<RefCell<Host>>, _w: u32, _h: u32) {}
+
+/// Honour `gui.request_show` / `request_hide` for whichever plugin window is open.
+fn apply_gui_visibility(host: &Rc<RefCell<Host>>, show: bool) {
+    let hst = host.borrow();
+    match hst.gui.as_ref() {
+        Some(PluginWindow::Floating(f)) => {
+            if show {
+                let _ = f.show();
+            } else {
+                let _ = f.hide();
+            }
+        }
+        #[cfg(windows)]
+        Some(PluginWindow::Embedded(e)) => {
+            if show {
+                e.show();
+            } else {
+                e.hide();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -292,7 +361,9 @@ pub fn run(
         let (ui_w, setup_w) = (ui.as_weak(), setup.as_weak());
         ui.on_open_setup(move || {
             let Some(ui) = ui_w.upgrade() else { return };
-            let Some(setup) = setup_w.upgrade() else { return };
+            let Some(setup) = setup_w.upgrade() else {
+                return;
+            };
             if let Err(e) = setup.show() {
                 ui.set_log_text(SharedString::from(format!("setup dialog: {e}")));
             }
@@ -489,6 +560,15 @@ pub fn run(
                 }
                 ui.set_gui_open(false);
             }
+            if let Some((w, h)) = take_requested_resize() {
+                apply_requested_resize(&ui, &host, w, h);
+            }
+            if take_gui_show_requested() {
+                apply_gui_visibility(&host, true);
+            }
+            if take_gui_hide_requested() {
+                apply_gui_visibility(&host, false);
+            }
             if take_restart_request() {
                 let name = ui
                     .get_audio_devices()
@@ -560,7 +640,9 @@ fn wire_device_callbacks(ui: &HostWindow, setup: &SetupDialog, host: &Rc<RefCell
     }
     {
         let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
-        setup.on_audio_device_changed(move |index| pick_output_device(&ui_w, &setup_w, &host, index));
+        setup.on_audio_device_changed(move |index| {
+            pick_output_device(&ui_w, &setup_w, &host, index)
+        });
     }
     {
         let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
@@ -583,7 +665,9 @@ fn wire_device_callbacks(ui: &HostWindow, setup: &SetupDialog, host: &Rc<RefCell
     {
         let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
         setup.on_sample_rate_changed(move |index| {
-            let Some(setup) = setup_w.upgrade() else { return };
+            let Some(setup) = setup_w.upgrade() else {
+                return;
+            };
             setup.set_sample_rate_index(index);
             let label = setup
                 .get_sample_rate_options()
@@ -597,7 +681,9 @@ fn wire_device_callbacks(ui: &HostWindow, setup: &SetupDialog, host: &Rc<RefCell
     {
         let (host, ui_w, setup_w) = (Rc::clone(host), ui.as_weak(), setup.as_weak());
         setup.on_buffer_size_changed(move |index| {
-            let Some(setup) = setup_w.upgrade() else { return };
+            let Some(setup) = setup_w.upgrade() else {
+                return;
+            };
             setup.set_buffer_size_index(index);
             let label = setup
                 .get_buffer_size_options()
