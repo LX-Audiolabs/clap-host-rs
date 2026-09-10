@@ -19,12 +19,13 @@ use clap_sys::ext::gui::{CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32, clap_plugin_gui, c
 use clap_sys::plugin::clap_plugin;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, WNDCLASSW, SM_CXSCREEN,
-    SM_CYSCREEN, WS_CHILD, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+    SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos, ShowWindow,
+    WNDCLASSW, WS_CHILD, WS_VISIBLE,
 };
 use windows_sys::core::PCWSTR;
 
@@ -220,6 +221,39 @@ impl EmbeddedGui {
         } else {
             (0, 0)
         }
+    }
+
+    /// Resize the socket to `width` x `height` physical px, keeping its
+    /// position and z-order. Call *after* `request_size` + `preferred_size`
+    /// picked the size the plugin actually took. Main thread only.
+    pub fn resize(&self, width: u32, height: u32) {
+        unsafe {
+            SetWindowPos(
+                self.socket,
+                ptr::null_mut(),
+                0,
+                0,
+                width as i32,
+                height as i32,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    /// Show the embedded editor (plugin `gui.show` + socket `SW_SHOW`).
+    pub fn show(&self) {
+        if let Some(show) = gui_ext(self.plugin).and_then(|g| g.show) {
+            unsafe { show(self.plugin) };
+        }
+        unsafe { ShowWindow(self.socket, SW_SHOW) };
+    }
+
+    /// Hide the embedded editor (plugin `gui.hide` + socket `SW_HIDE`).
+    pub fn hide(&self) {
+        if let Some(hide) = gui_ext(self.plugin).and_then(|g| g.hide) {
+            unsafe { hide(self.plugin) };
+        }
+        unsafe { ShowWindow(self.socket, SW_HIDE) };
     }
 }
 

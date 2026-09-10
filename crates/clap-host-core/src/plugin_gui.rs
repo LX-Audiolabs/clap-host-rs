@@ -69,6 +69,20 @@ impl FloatingGui {
             None => Err("clap.gui has no show".into()),
         }
     }
+
+    /// `gui.show` on an already-created floating window. Main thread only.
+    pub fn show(&self) -> bool {
+        gui_ext(self.plugin)
+            .and_then(|g| g.show)
+            .is_some_and(|f| unsafe { f(self.plugin) })
+    }
+
+    /// `gui.hide` on an already-created floating window. Main thread only.
+    pub fn hide(&self) -> bool {
+        gui_ext(self.plugin)
+            .and_then(|g| g.hide)
+            .is_some_and(|f| unsafe { f(self.plugin) })
+    }
 }
 
 impl Drop for FloatingGui {
