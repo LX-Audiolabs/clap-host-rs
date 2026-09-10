@@ -155,8 +155,14 @@ Fund aus Quellcode-Vergleich (`host/plugin-host.cc`, 2026-09-02):
   `process()` und `params.flush` in einer lock-free `PluginOutEvent`-Queue;
   der GUI-Poll drained sie per Timer und spiegelt Werte in Param-Sliders und
   Remote-Controls.
-- **Verweis:** `clap.thread-pool` und `clap.posix-fd-support` haben eigene
-  Pläne unter `.superpowers/` — hier nicht weiter verfolgt.
+- **`clap.posix-fd-support`** — ✅ ERLEDIGT (2026-09-10, unix-only):
+  Host serviert die Extension unter Linux/macOS (FD-Registrierung,
+  Modifizieren, Deregistrierung + Hintergrund-Poll-Thread); Delivery der
+  fälligen fd-Events läuft auf dem Main-Thread via `pump_main_thread`
+  (gleicher Pfad wie Timer). Windows advertised die Extension nicht
+  (`#[cfg(unix)]`-gate im Dispatch, host.rs).
+- **Verweis:** `clap.thread-pool` hat einen eigenen Plan unter
+  `.superpowers/` — hier nicht weiter verfolgt.
 - **"Provide Cookie"-Toggle** — ✅ ERLEDIGT: `ParamInfo.cookie` wird aus
   `clap_param_info` übernommen und in Param-Events (Audio-Thread + `set_param`)
   zurückgespiegelt; Plugins mit Cookie-Lookup brauchen keinen langsamen

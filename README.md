@@ -134,5 +134,8 @@ Known gaps, roughly ordered by usefulness:
 - Done: `clap_plugin_preset_load` and live `gui.request_resize` (embedded;
   floating resize is a no-op) plus `gui.request_show`/`request_hide` —
   plugin→host requests are handled; host-window drag → embedded socket
-  growth remains open. Further host extensions (`clap.thread-pool`,
-  `clap.posix-fd-support`) are tracked in sibling plans under `.superpowers/`.
+  growth remains open. `clap.posix-fd-support` is served on Linux/macOS
+  (fd registration, modify/unregister and a background poll thread; due fd
+  events are delivered on the main thread via `pump_main_thread`, the same
+  path as timers). Windows hosts omit the extension. `clap.thread-pool`
+  is still tracked in a sibling plan under `.superpowers/`.
