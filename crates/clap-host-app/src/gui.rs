@@ -567,6 +567,10 @@ pub fn run(
                     // on_load_state does (gui.rs:537-538).
                     let filter = ui.get_param_filter();
                     params_model.set_vec(param_rows_filtered(&host.borrow(), filter.as_str()));
+                    // The callback already consumed the plugin's loaded()
+                    // notification; the timer drain below stays for
+                    // plugin-initiated loads.
+                    let _ = take_preset_loaded();
                 }
                 Err(e) => ui.set_log_text(SharedString::from(format!("load preset: {e}"))),
             }
@@ -612,6 +616,8 @@ pub fn run(
             if take_state_dirty() {
                 ui.set_state_dirty(true);
             }
+            // Plugin-initiated loads only; host-initiated ones are drained in
+            // on_load_preset above.
             if take_preset_loaded() {
                 let filter = ui.get_param_filter();
                 params_model.set_vec(param_rows_filtered(&host.borrow(), filter.as_str()));
