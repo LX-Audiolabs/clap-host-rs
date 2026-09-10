@@ -3,6 +3,10 @@
 
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+#[cfg(unix)]
+use clap_sys::ext::posix_fd_support::{
+    CLAP_EXT_POSIX_FD_SUPPORT, clap_host_posix_fd_support, clap_posix_fd_flags,
+};
 use clap_sys::{
     ext::{
         gui::{CLAP_EXT_GUI, clap_host_gui},
@@ -128,6 +132,10 @@ pub fn pump_main_thread(plugin: *const clap_plugin) {
     }
     // Fire due timers here, on the main thread — never in the timer thread.
     fire_due_timers(plugin);
+    // Deliver due fd events here too, on the main thread — never in the
+    // poll thread.
+    #[cfg(unix)]
+    crate::posix_fd::drain_due(plugin);
 }
 
 /// True once per `params.rescan`/`params.clear` from the plugin.
@@ -390,6 +398,32 @@ unsafe extern "C" fn host_timer_unregister(_: *const clap_host, timer_id: clap_i
     cancel_timer(timer_id)
 }
 
+// ---------------------------------------------------------------------------
+// POSIX fd support (unix only) — descriptors are polled on a background
+// thread; `pump_main_thread` (main thread) delivers them via `on_fd`.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+unsafe extern "C" fn host_posix_fd_register(
+    _: *const clap_host,
+    fd: i32,
+    flags: clap_posix_fd_flags,
+) -> bool {
+    crate::posix_fd::register_fd(fd, flags)
+}
+#[cfg(unix)]
+unsafe extern "C" fn host_posix_fd_modify(
+    _: *const clap_host,
+    fd: i32,
+    flags: clap_posix_fd_flags,
+) -> bool {
+    crate::posix_fd::modify_fd(fd, flags)
+}
+#[cfg(unix)]
+unsafe extern "C" fn host_posix_fd_unregister(_: *const clap_host, fd: i32) -> bool {
+    crate::posix_fd::unregister_fd(fd)
+}
+
 static LOG_EXT: clap_host_log = clap_host_log {
     log: Some(host_log),
 };
@@ -415,6 +449,12 @@ static PRESET_LOAD_EXT: clap_host_preset_load = clap_host_preset_load {
 static TIMER_EXT: clap_host_timer_support = clap_host_timer_support {
     register_timer: Some(host_timer_register),
     unregister_timer: Some(host_timer_unregister),
+};
+#[cfg(unix)]
+static POSIX_FD_EXT: clap_host_posix_fd_support = clap_host_posix_fd_support {
+    register_fd: Some(host_posix_fd_register),
+    modify_fd: Some(host_posix_fd_modify),
+    unregister_fd: Some(host_posix_fd_unregister),
 };
 static LATENCY_EXT: clap_host_latency = clap_host_latency {
     changed: Some(host_latency_changed),
@@ -472,6 +512,10 @@ unsafe extern "C" fn host_get_extension(_: *const clap_host, id: *const c_char) 
     if id == CLAP_EXT_PRESET_LOAD || id == CLAP_EXT_PRESET_LOAD_COMPAT {
         return ptr::from_ref(&PRESET_LOAD_EXT).cast();
     }
+    #[cfg(unix)]
+    if id == CLAP_EXT_POSIX_FD_SUPPORT {
+        return ptr::from_ref(&POSIX_FD_EXT).cast();
+    }
     ptr::null()
 }
 unsafe extern "C" fn host_request_restart(_: *const clap_host) {
@@ -492,6 +536,8 @@ pub fn make_host() -> &'static clap_host {
     }
     let _ = MAIN_THREAD.set(std::thread::current().id());
     spawn_timer_thread();
+    #[cfg(unix)]
+    crate::posix_fd::init_poll_thread();
     let s = Box::leak(Box::new(Strings {
         name: CString::new("CLAP-Host-RS").unwrap(),
         vendor: CString::new("lxndrbe").unwrap(),
@@ -658,6 +704,8 @@ mod tests {
             CLAP_EXT_REMOTE_CONTROLS_COMPAT,
             CLAP_EXT_PRESET_LOAD,
             CLAP_EXT_PRESET_LOAD_COMPAT,
+            #[cfg(unix)]
+            CLAP_EXT_POSIX_FD_SUPPORT,
         ] {
             // Pass a fresh copy (same bytes, different address): the lookup
             // must compare string content, not pointer identity.
