@@ -170,6 +170,8 @@ impl Engine {
     /// cpal callback body. `data` is interleaved f32 for `device_channels`.
     pub fn process(&mut self, data: &mut [f32]) {
         mark_audio_thread();
+        let _guard = CurrentPluginGuard;
+        crate::thread_pool::set_current_plugin(self.plugin.0);
         if self.device_channels == 0 {
             return;
         }
@@ -313,6 +315,15 @@ fn device_label(device: &cpal::Device) -> String {
     device
         .description()
         .map_or_else(|_| "<unnamed>".into(), |d| d.name().to_string())
+}
+
+/// Clears the thread-pool's current-plugin pointer when `process` returns —
+/// every early-return path in `process` drops this guard first.
+struct CurrentPluginGuard;
+impl Drop for CurrentPluginGuard {
+    fn drop(&mut self) {
+        crate::thread_pool::set_current_plugin(ptr::null());
+    }
 }
 
 /// Names of the available output devices, in `open()` order.

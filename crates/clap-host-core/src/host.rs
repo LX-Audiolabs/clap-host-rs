@@ -26,6 +26,7 @@ use clap_sys::{
         state::{CLAP_EXT_STATE, clap_host_state},
         tail::{CLAP_EXT_TAIL, clap_host_tail},
         thread_check::{CLAP_EXT_THREAD_CHECK, clap_host_thread_check},
+        thread_pool::{CLAP_EXT_THREAD_POOL, clap_host_thread_pool},
         timer_support::{
             CLAP_EXT_TIMER_SUPPORT, clap_host_timer_support, clap_plugin_timer_support,
         },
@@ -48,7 +49,7 @@ use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 // Host extensions — log + thread_check + gui + params + state + timer +
-// latency + tail + note-name + remote-controls + preset-load +
+// latency + tail + note-name + remote-controls + preset-load + thread-pool +
 // posix-fd-support (unix).
 // ---------------------------------------------------------------------------
 
@@ -475,6 +476,14 @@ static THREAD_CHECK_EXT: clap_host_thread_check = clap_host_thread_check {
     is_audio_thread: Some(host_is_audio_thread),
 };
 
+unsafe extern "C" fn host_thread_pool_request_exec(_: *const clap_host, num_tasks: u32) -> bool {
+    crate::thread_pool::request_exec(num_tasks)
+}
+
+static THREAD_POOL_EXT: clap_host_thread_pool = clap_host_thread_pool {
+    request_exec: Some(host_thread_pool_request_exec),
+};
+
 unsafe extern "C" fn host_get_extension(_: *const clap_host, id: *const c_char) -> *const c_void {
     if id.is_null() {
         return ptr::null();
@@ -517,6 +526,9 @@ unsafe extern "C" fn host_get_extension(_: *const clap_host, id: *const c_char) 
     if id == CLAP_EXT_POSIX_FD_SUPPORT {
         return ptr::from_ref(&POSIX_FD_EXT).cast();
     }
+    if id == CLAP_EXT_THREAD_POOL {
+        return ptr::from_ref(&THREAD_POOL_EXT).cast();
+    }
     ptr::null()
 }
 unsafe extern "C" fn host_request_restart(_: *const clap_host) {
@@ -537,6 +549,7 @@ pub fn make_host() -> &'static clap_host {
     }
     let _ = MAIN_THREAD.set(std::thread::current().id());
     spawn_timer_thread();
+    crate::thread_pool::init();
     #[cfg(unix)]
     crate::posix_fd::init_poll_thread();
     let s = Box::leak(Box::new(Strings {
@@ -705,6 +718,7 @@ mod tests {
             CLAP_EXT_REMOTE_CONTROLS_COMPAT,
             CLAP_EXT_PRESET_LOAD,
             CLAP_EXT_PRESET_LOAD_COMPAT,
+            CLAP_EXT_THREAD_POOL,
             #[cfg(unix)]
             CLAP_EXT_POSIX_FD_SUPPORT,
         ] {
