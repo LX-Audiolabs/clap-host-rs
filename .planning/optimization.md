@@ -161,8 +161,13 @@ Fund aus Quellcode-Vergleich (`host/plugin-host.cc`, 2026-09-02):
   fälligen fd-Events läuft auf dem Main-Thread via `pump_main_thread`
   (gleicher Pfad wie Timer). Windows advertised die Extension nicht
   (`#[cfg(unix)]`-gate im Dispatch, host.rs).
-- **Verweis:** `clap.thread-pool` hat einen eigenen Plan unter
-  `.superpowers/` — hier nicht weiter verfolgt.
+- **`clap.thread-pool`** — ✅ ERLEDIGT (2026-09-10): Host serviert die
+  Extension (`request_exec` → `thread_pool::request_exec`); Pool-Größe =
+  `available_parallelism` (Fallback 1). Fan-out: Mehr-Task-Requests werden
+  auf die Worker-Threads verteilt (Claim-Loop, einzelner Task läuft auf dem
+  Aufrufer); der Pool-Current-Plugin-Pointer wird um `process()` gepinnt
+  (`set_current_plugin` im Engine-Callback, `CurrentPluginGuard` cleared beim
+  Return). Module: `thread_pool.rs`, Dispatch in `host.rs`.
 - **"Provide Cookie"-Toggle** — ✅ ERLEDIGT: `ParamInfo.cookie` wird aus
   `clap_param_info` übernommen und in Param-Events (Audio-Thread + `set_param`)
   zurückgespiegelt; Plugins mit Cookie-Lookup brauchen keinen langsamen
@@ -268,7 +273,10 @@ genannt).
 **Update 2026-09-03:** `CLAP_PATH` ✅ (`scan.rs`, `;`/`:`-getrennt, Spec),
 `"(none)"`-Eintrag im Audio-Input-Picker ✅ (Setup-Dialog, Reihe 0),
 Symlink-Zyklen-Guard ✅ (Canonicalisierung + visited-Set pro Scan,
-Unix-Cycle-Test). Offen: Thread-Pool, Transport/Timeline, Multi-Plugin-Graph.
+Unix-Cycle-Test).
+
+**Update 2026-09-10:** Thread-Pool ✅ (siehe "Host-Extension-Lücken" oben).
+Offen: Transport/Timeline, Multi-Plugin-Graph.
 
 **Kurskorrektur:** Remote-Controls-Extension war hier als Non-Goal gelistet,
 ist jetzt oben ("Remote-Controls Paging-UI") aktiv aufgenommen — nicht mehr

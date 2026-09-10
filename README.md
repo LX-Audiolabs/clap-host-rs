@@ -119,8 +119,6 @@ Two crates:
 
 Known gaps, roughly ordered by usefulness:
 
-- Audio thread pool — one cpal callback per plugin blocks a multi-plugin
-  graph.
 - Transport/timeline (`clap_transport`) — the engine currently passes a null
   transport.
 - Multi-plugin graph with connections — the session owns exactly one plugin.
@@ -137,5 +135,8 @@ Known gaps, roughly ordered by usefulness:
   growth remains open. `clap.posix-fd-support` is served on Linux/macOS
   (fd registration, modify/unregister and a background poll thread; due fd
   events are delivered on the main thread via `pump_main_thread`, the same
-  path as timers). Windows hosts omit the extension. `clap.thread-pool`
-  is still tracked in a sibling plan under `.superpowers/`.
+  path as timers). Windows hosts omit the extension. `clap.thread-pool` is
+  served: pool size = `available_parallelism`, `request_exec` fans tasks out
+  to the workers (single-task requests run on the caller), and the pool's
+  current-plugin pointer is pinned for the duration of `process()` and
+  cleared by a guard on return.
