@@ -552,11 +552,16 @@ pub fn run(
                 .add_filter("CLAP preset", &["clap-preset"])
                 .add_filter("All files", &["*"])
                 .pick_file()
-            else { return };
+            else {
+                return;
+            };
             let h = host.borrow();
             match preset::load_file(h.plugin(), &file) {
                 Ok(()) => {
-                    ui.set_log_text(SharedString::from(format!("preset loaded: {}", file.display())));
+                    ui.set_log_text(SharedString::from(format!(
+                        "preset loaded: {}",
+                        file.display()
+                    )));
                     drop(h);
                     // The plugin changed param values; refresh the model like
                     // on_load_state does (gui.rs:537-538).

@@ -299,17 +299,19 @@ const TIMER_TICK: Duration = Duration::from_millis(5);
 
 fn spawn_timer_thread() {
     TIMER_THREAD.call_once(|| {
-        std::thread::spawn(|| loop {
-            std::thread::sleep(TIMER_TICK);
-            let now = Instant::now();
-            let Ok(mut timers) = TIMERS.lock() else {
-                continue;
-            };
-            for (id, period_ms, last) in timers.iter_mut() {
-                if now.duration_since(*last) >= Duration::from_millis(u64::from(*period_ms)) {
-                    *last = now;
-                    // Full queue means the main thread is stuck; drop, don't block.
-                    let _ = TIMER_DUE.push(*id);
+        std::thread::spawn(|| {
+            loop {
+                std::thread::sleep(TIMER_TICK);
+                let now = Instant::now();
+                let Ok(mut timers) = TIMERS.lock() else {
+                    continue;
+                };
+                for (id, period_ms, last) in timers.iter_mut() {
+                    if now.duration_since(*last) >= Duration::from_millis(u64::from(*period_ms)) {
+                        *last = now;
+                        // Full queue means the main thread is stuck; drop, don't block.
+                        let _ = TIMER_DUE.push(*id);
+                    }
                 }
             }
         });
@@ -532,7 +534,10 @@ mod tests {
         }
     }
 
-    unsafe extern "C" fn fake_get_extension(_: *const clap_plugin, id: *const c_char) -> *const c_void {
+    unsafe extern "C" fn fake_get_extension(
+        _: *const clap_plugin,
+        id: *const c_char,
+    ) -> *const c_void {
         if !id.is_null() && unsafe { CStr::from_ptr(id) } == CLAP_EXT_TIMER_SUPPORT {
             ptr::from_ref(&PLUGIN_TIMER).cast()
         } else {

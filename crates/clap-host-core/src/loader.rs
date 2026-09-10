@@ -205,7 +205,9 @@ pub fn note_dialect(plugin: *const clap_plugin) -> Dialect {
 /// Call `params.flush` with an empty input list — the audio-thread half of
 /// `params.request_flush`. No-op when the plugin has no params extension.
 pub fn flush_params(plugin: *const clap_plugin) {
-    let Some(params) = params_ext(plugin) else { return };
+    let Some(params) = params_ext(plugin) else {
+        return;
+    };
     let Some(flush) = params.flush else { return };
     let in_ev = crate::events::empty_input_events();
     let out_ev = sink_output_events();

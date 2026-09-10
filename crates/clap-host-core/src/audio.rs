@@ -339,7 +339,9 @@ pub fn sample_rates(device_name: Option<&str>) -> Vec<u32> {
             .and_then(|mut devs| devs.find(|d| device_label(d) == want)),
         None => host.default_output_device(),
     };
-    let Some(device) = device else { return Vec::new() };
+    let Some(device) = device else {
+        return Vec::new();
+    };
     let Ok(default_cfg) = device.default_output_config() else {
         return Vec::new();
     };

@@ -39,12 +39,18 @@ pub fn available(plugin: *const clap_plugin) -> bool {
 /// is absent, or a `get` call fails.
 #[must_use]
 pub fn pages(plugin: *const clap_plugin) -> Vec<PageInfo> {
-    let Some(ext) = rc_ext(plugin) else { return Vec::new() };
-    let (Some(count), Some(get)) = (ext.count, ext.get) else { return Vec::new() };
+    let Some(ext) = rc_ext(plugin) else {
+        return Vec::new();
+    };
+    let (Some(count), Some(get)) = (ext.count, ext.get) else {
+        return Vec::new();
+    };
     let n = unsafe { count(plugin) };
     (0..n)
         .filter_map(|i| {
-            let mut page = unsafe { std::mem::zeroed::<clap_sys::ext::remote_controls::clap_remote_controls_page>() };
+            let mut page = unsafe {
+                std::mem::zeroed::<clap_sys::ext::remote_controls::clap_remote_controls_page>()
+            };
             if !unsafe { get(plugin, i, &raw mut page) } {
                 return None;
             }
@@ -53,7 +59,11 @@ pub fn pages(plugin: *const clap_plugin) -> Vec<PageInfo> {
                 .into_owned();
             let take = page.param_ids.iter().take_while(|&&id| id != 0).copied();
             let params: Vec<clap_id> = take.take(CLAP_REMOTE_CONTROLS_COUNT).collect();
-            Some(PageInfo { page_id: page.page_id, name, params })
+            Some(PageInfo {
+                page_id: page.page_id,
+                name,
+                params,
+            })
         })
         .collect()
 }
@@ -89,7 +99,13 @@ mod tests {
         page.page_id = 100 + page_index;
         let name = format!("Page {page_index}");
         let bytes = name.as_bytes();
-        page.page_name[..bytes.len()].copy_from_slice(bytes.iter().map(|&b| b as c_char).collect::<Vec<_>>().as_slice());
+        page.page_name[..bytes.len()].copy_from_slice(
+            bytes
+                .iter()
+                .map(|&b| b as c_char)
+                .collect::<Vec<_>>()
+                .as_slice(),
+        );
         page.param_ids = [10, 11, 12, 13, 14, 15, 16, 17];
         true
     }

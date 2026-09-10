@@ -200,10 +200,7 @@ unsafe extern "C" fn empty_size(_: *const clap_input_events) -> u32 {
     0
 }
 
-unsafe extern "C" fn empty_get(
-    _: *const clap_input_events,
-    _: u32,
-) -> *const clap_event_header {
+unsafe extern "C" fn empty_get(_: *const clap_input_events, _: u32) -> *const clap_event_header {
     ptr::null()
 }
 

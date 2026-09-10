@@ -94,11 +94,7 @@ unsafe extern "C" fn stream_read(
     let avail = inner.data.len().saturating_sub(inner.pos);
     let n = avail.min(size as usize);
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            inner.data.as_ptr().add(inner.pos),
-            buffer.cast::<u8>(),
-            n,
-        );
+        std::ptr::copy_nonoverlapping(inner.data.as_ptr().add(inner.pos), buffer.cast::<u8>(), n);
     }
     inner.pos += n;
     i64::try_from(n).unwrap_or(i64::MAX)
@@ -106,7 +102,8 @@ unsafe extern "C" fn stream_read(
 
 /// Ask the plugin to serialize its state and write the blob to `path`.
 pub fn save(plugin: *const clap_plugin, path: &Path) -> Result<(), String> {
-    let state = loader::plugin_ext(plugin, CLAP_EXT_STATE).ok_or("plugin has no state extension")?;
+    let state =
+        loader::plugin_ext(plugin, CLAP_EXT_STATE).ok_or("plugin has no state extension")?;
     let state = unsafe { &*state.cast::<clap_plugin_state>() };
     let save = state.save.ok_or("state.save is null")?;
     let mut buf = StreamBuf::new();
@@ -118,7 +115,8 @@ pub fn save(plugin: *const clap_plugin, path: &Path) -> Result<(), String> {
 
 /// Read a state blob from `path` and hand it to the plugin's `state.load`.
 pub fn load(plugin: *const clap_plugin, path: &Path) -> Result<(), String> {
-    let state = loader::plugin_ext(plugin, CLAP_EXT_STATE).ok_or("plugin has no state extension")?;
+    let state =
+        loader::plugin_ext(plugin, CLAP_EXT_STATE).ok_or("plugin has no state extension")?;
     let state = unsafe { &*state.cast::<clap_plugin_state>() };
     let load = state.load.ok_or("state.load is null")?;
     let data = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;

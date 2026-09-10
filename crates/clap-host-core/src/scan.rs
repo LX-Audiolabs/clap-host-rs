@@ -12,7 +12,12 @@ pub fn standard_dirs() -> Vec<PathBuf> {
             dirs.push(PathBuf::from(p).join("CLAP"));
         }
         if let Ok(p) = std::env::var("LOCALAPPDATA") {
-            dirs.push(PathBuf::from(p).join("Programs").join("Common").join("CLAP"));
+            dirs.push(
+                PathBuf::from(p)
+                    .join("Programs")
+                    .join("Common")
+                    .join("CLAP"),
+            );
         }
     }
     #[cfg(target_os = "macos")]
@@ -55,11 +60,15 @@ fn scan_dir_inner(dir: &Path, visited: &mut HashSet<PathBuf>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     // Canonicalize to catch loops through links; an unreadable dir behaves
     // like a missing one (empty result).
-    let Ok(canonical) = std::fs::canonicalize(dir) else { return out };
+    let Ok(canonical) = std::fs::canonicalize(dir) else {
+        return out;
+    };
     if !visited.insert(canonical) {
         return out;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return out };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
