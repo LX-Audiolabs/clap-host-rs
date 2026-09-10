@@ -6,7 +6,7 @@
 //!   clap-host-rs --plugin <path.clap> [--id <clap-id>] [--list-params]
 //!                [--list-presets] [--pull-preset <key> --out <file>]
 //!                [--set <id>=<val>]... [--load-state <file>]
-//!                [--save-state <file>] [--play [--output-device <name>]
+//!                [--load-preset <file>] [--save-state <file>] [--play [--output-device <name>]
 //!                [--input-device <name>]] [--list-midi] [--midi-in <name>] |
 //!                --gui | --scan | --list-devices
 
@@ -87,6 +87,7 @@ fn main() {
         || !args.sets.is_empty()
         || args.pull_preset.is_some()
         || args.load_state.is_some()
+        || args.load_preset.is_some()
         || args.save_state.is_some();
     if !needs_instance {
         return;
@@ -117,6 +118,15 @@ fn main() {
         && let Err(e) = state::load(plugin, path)
     {
         eprintln!("error: load state: {e}");
+        std::process::exit(1);
+    }
+
+    // --load-preset after --load-state: the plugin applies its own preset
+    // file; explicit --set values below still win.
+    if let Some(path) = &args.load_preset
+        && let Err(e) = preset::load_file(plugin, path)
+    {
+        eprintln!("error: load preset: {e}");
         std::process::exit(1);
     }
 

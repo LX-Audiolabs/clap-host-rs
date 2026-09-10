@@ -6,6 +6,7 @@ pub const USAGE: &str = "usage: clap-host-rs [--scan | --plugin <path.clap> [--i
                          [--list-params] [--list-presets] \
                          [--pull-preset <key> --out <file>] [--set <id>=<val>]... \
                          [--load-state <file>] [--save-state <file>] \
+                         [--load-preset <file>] \
                          [--play | --gui [--output-device <name>] [--input-device <name>] \
                          [--sample-rate <hz>] [--buffer-size <frames>]] \
                          [--list-midi] [--midi-in <name>]] [--list-devices]";
@@ -28,6 +29,7 @@ pub struct Args {
     pub pull_preset: Option<String>,
     pub pull_out: Option<PathBuf>,
     pub load_state: Option<PathBuf>,
+    pub load_preset: Option<PathBuf>,
     pub save_state: Option<PathBuf>,
     pub sets: Vec<(u32, f64)>,
     pub list_midi: bool,
@@ -98,6 +100,10 @@ pub fn parse_args() -> Args {
             "--load-state" => {
                 i += 1;
                 a.load_state = argv.get(i).map(PathBuf::from);
+            }
+            "--load-preset" => {
+                i += 1;
+                a.load_preset = argv.get(i).map(PathBuf::from);
             }
             "--save-state" => {
                 i += 1;
