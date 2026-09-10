@@ -659,8 +659,11 @@ mod tests {
             CLAP_EXT_PRESET_LOAD,
             CLAP_EXT_PRESET_LOAD_COMPAT,
         ] {
+            // Pass a fresh copy (same bytes, different address): the lookup
+            // must compare string content, not pointer identity.
+            let copy = CString::new(id.to_bytes()).unwrap();
             assert!(
-                !unsafe { get(host, id.as_ptr()) }.is_null(),
+                !unsafe { get(host, copy.as_ptr()) }.is_null(),
                 "missing {id:?}"
             );
         }
