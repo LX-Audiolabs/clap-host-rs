@@ -27,6 +27,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# clap.posix-fd-support poll thread (epoll/kqueue) — unix only.
+[target.'cfg(unix)'.dependencies]
+polling = "3"
+
 [features]
 # ASIO audio backend via cpal. Needs the Steinberg ASIO SDK (CPAL_ASIO_DIR)
 # and LLVM/Clang (LIBCLANG_PATH) at build time — off by default.

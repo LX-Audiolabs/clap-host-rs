@@ -860,6 +860,7 @@ dependencies = [
  "crossbeam-queue",
  "libloading 0.9.0",
  "midir",
+ "polling",
  "windows-sys 0.61.2",
 ]
 

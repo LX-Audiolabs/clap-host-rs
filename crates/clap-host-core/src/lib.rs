@@ -8,6 +8,8 @@ pub mod host;
 pub mod loader;
 pub mod midi;
 pub mod plugin_gui;
+#[cfg(unix)]
+pub mod posix_fd;
 pub mod preset;
 pub mod remote_controls;
 pub mod scan;
