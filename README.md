@@ -39,6 +39,7 @@ clap-host-rs [--scan | --plugin <path.clap> [--id <clap-id>]
              [--list-params] [--list-presets]
              [--pull-preset <key> --out <file>] [--set <id>=<val>]...
              [--load-state <file>] [--save-state <file>]
+             [--load-preset <file>]
              [--play | --gui [--output-device <name>] [--input-device <name>]
              [--sample-rate <hz>] [--buffer-size <frames>]]
              [--list-midi] [--midi-in <name>]] [--list-devices]
@@ -56,6 +57,9 @@ clap-host-rs [--scan | --plugin <path.clap> [--id <clap-id>]
 - `--set <id>=<val>` — set parameters before activation (repeatable).
 - `--load-state <file>` / `--save-state <file>` — plugin state round-trip
   (load right after `init`, save after `--set`/preset pull).
+- `--load-preset <file>` — load a preset file into the plugin via
+  `clap.preset-load` (after `--load-state`; the plugin applies the preset
+  itself).
 - `--play` — open the audio device and process until Ctrl+C. `--output-device`/
   `--input-device` pick non-default devices; the input feeds the plugin's
   audio input ports. `--midi-in <name>` selects a MIDI input port.
@@ -78,6 +82,9 @@ plugin's `state.mark_dirty` lights a dot; save/load use `<plugin-file>.state.bin
 next to the plugin binary).
 Plugins exposing `clap.remote-controls` get a paging panel (page name +
 prev/next buttons) whose sliders mirror the plugin's parameter pages.
+A "Load Preset…" button (native file dialog, enabled only when the plugin
+implements `clap.preset-load`) asks the plugin to load the chosen preset file
+itself; failures surface as a plugin message in the status/log.
 
 Plugin GUI toggle behavior is Reaper-style: opening the editor swaps the
 parameter page for the plugin's own UI — only the plugin window plus the
@@ -85,6 +92,10 @@ host's top bar (save/load/setup buttons, status) stays visible. If the
 plugin can't float, its editor is embedded into the host window (Windows);
 the editor is capped to the monitor's work area if the plugin asks for more,
 and the host window's previous size is restored when the editor closes.
+An embedded plugin may change its editor size at runtime
+(`gui.request_resize`) — the editor slot and the host window grow with it,
+nothing is clipped. The plugin may also request showing/hiding its editor
+(`gui.request_show`/`request_hide`), e.g. to close its own UI.
 
 ## Architecture
 
@@ -111,9 +122,14 @@ Known gaps, roughly ordered by usefulness:
   transport.
 - Multi-plugin graph with connections — the session owns exactly one plugin.
 - Symlink-cycle guard in the scanner (Windows junctions can loop).
-- Preset browser in the GUI (presets are currently CLI-only via
-  `--list-presets`/`--pull-preset`).
-- Live `request_resize` handling for the embedded editor.
+- Preset browser in the GUI (listing/browsing factory presets is still
+  CLI-only via `--list-presets`/`--pull-preset`; loading a preset file works
+  via `--load-preset` and the GUI's "Load Preset…" button).
 - Editor embedding on macOS/Linux (currently Windows-only).
 - Channel routing: pick a channel pair on many-channel interfaces instead of
   always using the first channels.
+- Done: `clap_plugin_preset_load` and live `gui.request_resize` (embedded;
+  floating resize is a no-op) plus `gui.request_show`/`request_hide` —
+  plugin→host requests are handled; host-window drag → embedded socket
+  growth remains open. Further host extensions (`clap.thread-pool`,
+  `clap.posix-fd-support`) are tracked in sibling plans under `.superpowers/`.

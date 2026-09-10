@@ -59,8 +59,15 @@ Notation: `HOST` = `target/debug/clap-host-rs` (or `target/release/clap-host-rs`
 19. [ ] **State save/load**: the buttons write/read `<plugin>.state.bin`;
         after a parameter change the dirty dot appears, save clears it, load
         restores the slider values.
+20. [ ] **Preset laden**: `HOST --plugin SYNTH --load-preset <file>` plus the
+        GUI "Load Preset…" button — the sliders show the preset values; the
+        error case shows the plugin's message in the log.
+21. [ ] **Embedded-Resize**: Surge-XT zoom changes the editor size — the slot
+        and the host window grow with it, nothing is clipped.
+22. [ ] **Show/Hide**: when the plugin sends `request_hide`/`request_show`,
+        the editor disappears/reappears without a crash (floating + embedded).
 
 ## Regression guards
 
-20. [ ] `cargo test --workspace` — all tests pass.
-21. [ ] `cargo clippy --workspace --all-targets -- -D warnings` — no warnings.
+23. [ ] `cargo test --workspace` — all tests pass.
+24. [ ] `cargo clippy --workspace --all-targets -- -D warnings` — no warnings.
