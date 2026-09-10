@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "clap-host-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap-host-core",
  "midir",
@@ -853,7 +853,7 @@ dependencies = [
 
 [[package]]
 name = "clap-host-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap-sys",
  "cpal",
