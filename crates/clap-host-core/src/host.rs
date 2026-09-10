@@ -48,7 +48,8 @@ use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 // Host extensions — log + thread_check + gui + params + state + timer +
-// latency + tail + note-name + remote-controls + preset-load.
+// latency + tail + note-name + remote-controls + preset-load +
+// posix-fd-support (unix).
 // ---------------------------------------------------------------------------
 
 static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();

@@ -41,6 +41,9 @@ struct Registry {
 
 fn event_for(fd: i32, flags: clap_posix_fd_flags) -> Option<Event> {
     let key = usize::try_from(fd).ok()?;
+    if flags & (CLAP_POSIX_FD_READ | CLAP_POSIX_FD_WRITE) == 0 {
+        return None;
+    }
     Some(Event::new(
         key,
         flags & CLAP_POSIX_FD_READ != 0,
@@ -73,6 +76,9 @@ fn spawn_poll_thread(poller: Arc<Poller>) {
         while !WAKE_STOP.load(Ordering::Acquire) {
             events.clear();
             if poller.wait(&mut events, Some(WAIT_TIMEOUT)).is_err() {
+                // Avoid a busy loop on a persistent wait error; the sleep
+                // doubles as the stop-check cadence.
+                std::thread::sleep(WAIT_TIMEOUT);
                 continue;
             }
             for ev in events.iter() {
@@ -96,7 +102,8 @@ fn spawn_poll_thread(poller: Arc<Poller>) {
 }
 
 /// Register interest in `fd`. Fails if the fd is already registered, invalid,
-/// or the poller rejected it.
+/// the flags request neither read nor write interest, or the poller rejected
+/// it.
 pub fn register_fd(fd: i32, flags: clap_posix_fd_flags) -> bool {
     init_poll_thread();
     let Some(event) = event_for(fd, flags) else {
@@ -117,10 +124,15 @@ pub fn register_fd(fd: i32, flags: clap_posix_fd_flags) -> bool {
         return false;
     }
     reg.fds.insert(fd, flags);
+    // Wake the poll thread so an already-ready fd is picked up without
+    // waiting for the next timeout tick.
+    let _ = reg.poller.notify();
     true
 }
 
-/// Change the watched event kinds for a previously registered `fd`.
+/// Change the watched event kinds for a previously registered `fd`. Fails if
+/// the fd is not registered or the flags request neither read nor write
+/// interest.
 pub fn modify_fd(fd: i32, flags: clap_posix_fd_flags) -> bool {
     init_poll_thread();
     let Some(event) = event_for(fd, flags) else {
@@ -204,6 +216,18 @@ mod tests {
         let fd = a.as_raw_fd();
         assert!(register_fd(fd, CLAP_POSIX_FD_READ));
         assert!(!register_fd(fd, CLAP_POSIX_FD_READ));
+        assert!(unregister_fd(fd));
+    }
+
+    #[test]
+    fn register_without_read_or_write_fails() {
+        init_poll_thread();
+        let (a, _b) = UnixStream::pair().unwrap();
+        let fd = a.as_raw_fd();
+        assert!(!register_fd(fd, 0));
+        assert!(!register_fd(fd, CLAP_POSIX_FD_ERROR));
+        assert!(!modify_fd(fd, 0));
+        assert!(register_fd(fd, CLAP_POSIX_FD_READ));
         assert!(unregister_fd(fd));
     }
 
