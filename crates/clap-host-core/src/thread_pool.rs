@@ -209,7 +209,10 @@ mod tests {
         set_current_plugin(ptr::null());
     }
 
-    unsafe extern "C" fn null_get_extension(_: *const clap_plugin, _: *const c_char) -> *const c_void {
+    unsafe extern "C" fn null_get_extension(
+        _: *const clap_plugin,
+        _: *const c_char,
+    ) -> *const c_void {
         ptr::null()
     }
 
