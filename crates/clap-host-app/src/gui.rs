@@ -351,7 +351,7 @@ pub fn run(
             // While a stream runs the audio thread applies it; otherwise flush directly.
             if h.session.is_some() {
                 let _ = h.ui_q.push(UiEvent::Param { id, value });
-            } else if let Err(e) = loader::set_param(h.plugin(), id, value) {
+            } else if let Err(e) = loader::set_param(h.plugin(), id, value, Some(&h.out_q)) {
                 eprintln!("warn: set param {id}: {e}");
             }
         });
@@ -499,7 +499,7 @@ pub fn run(
             // Same event path as on_param_changed — a page is just another view.
             if h.session.is_some() {
                 let _ = h.ui_q.push(UiEvent::Param { id, value });
-            } else if let Err(e) = loader::set_param(h.plugin(), id, value) {
+            } else if let Err(e) = loader::set_param(h.plugin(), id, value, Some(&h.out_q)) {
                 eprintln!("warn: set param {id}: {e}");
             }
         });

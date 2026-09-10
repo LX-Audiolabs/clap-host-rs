@@ -132,7 +132,7 @@ fn main() {
 
     // Applied while deactivated, so the values are in effect before activate().
     for (id, value) in &args.sets {
-        match loader::set_param(plugin, *id, *value) {
+        match loader::set_param(plugin, *id, *value, None) {
             Ok(()) => println!("set param {id} = {value}"),
             Err(e) => eprintln!("error: set param {id}: {e}"),
         }

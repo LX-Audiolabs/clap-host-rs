@@ -250,7 +250,7 @@ impl Engine {
         // The plugin asked (maybe from its GUI thread) for a params flush;
         // the spec wants it on the audio thread, so it happens here.
         if crate::host::take_params_flush_requested() {
-            loader::flush_params(self.plugin.0);
+            loader::flush_params(self.plugin.0, &self.out_tx);
         }
         // Deinterleave captured input into plugin input port buffers.
         // Each frame contributes one sample per input channel in the ring buffer.

@@ -21,7 +21,9 @@ use clap_sys::{
 };
 use std::ffi::{CStr, CString, c_char, c_void};
 
-use crate::events::{Dialect, EvList, sink_output_events};
+use crate::events::{
+    Dialect, EvList, PluginOutEvent, Queue, capturing_output_events, sink_output_events,
+};
 
 // ---------------------------------------------------------------------------
 // Loader
@@ -204,18 +206,25 @@ pub fn note_dialect(plugin: *const clap_plugin) -> Dialect {
 
 /// Call `params.flush` with an empty input list — the audio-thread half of
 /// `params.request_flush`. No-op when the plugin has no params extension.
-pub fn flush_params(plugin: *const clap_plugin) {
+pub fn flush_params(plugin: *const clap_plugin, out_tx: &Queue<PluginOutEvent>) {
     let Some(params) = params_ext(plugin) else {
         return;
     };
     let Some(flush) = params.flush else { return };
     let in_ev = crate::events::empty_input_events();
-    let out_ev = sink_output_events();
+    let out_ev = capturing_output_events(out_tx);
     unsafe { flush(plugin, &raw const in_ev, &raw const out_ev) };
 }
 
 /// Set one param on the *deactivated* plugin via `params.flush` (main thread).
-pub fn set_param(plugin: *const clap_plugin, id: clap_id, value: f64) -> Result<(), String> {
+/// `out_tx` captures the plugin's feedback events; CLI callers with no consumer
+/// pass `None` (events are discarded).
+pub fn set_param(
+    plugin: *const clap_plugin,
+    id: clap_id,
+    value: f64,
+    out_tx: Option<&Queue<PluginOutEvent>>,
+) -> Result<(), String> {
     let params = params_ext(plugin).ok_or("plugin has no clap.params extension")?;
     let flush = params.flush.ok_or("clap.params has no flush")?;
     // Echo the plugin's own cookie back when we know it (self::params — the
@@ -227,7 +236,10 @@ pub fn set_param(plugin: *const clap_plugin, id: clap_id, value: f64) -> Result<
     let mut evs = EvList::with_capacity(1);
     evs.push_param(id, value, cookie, 0);
     let in_ev = evs.as_input_events();
-    let out_ev = sink_output_events();
+    let out_ev = match out_tx {
+        Some(q) => capturing_output_events(q),
+        None => sink_output_events(),
+    };
     unsafe { flush(plugin, &raw const in_ev, &raw const out_ev) };
     Ok(())
 }
