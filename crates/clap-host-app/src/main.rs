@@ -320,11 +320,20 @@ fn run_play(
     input_name: Option<&str>,
     settings: &audio::StreamSettings,
 ) {
-    let session = audio::open(plugin, device_name, input_name, midi_rx, ui_rx, settings)
-        .unwrap_or_else(|e| {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        });
+    let out_q = events::queue();
+    let session = audio::open(
+        plugin,
+        device_name,
+        input_name,
+        midi_rx,
+        ui_rx,
+        out_q,
+        settings,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    });
     println!(
         "audio ports: in {:?} / out {:?} (channels per port), note dialect {:?}",
         session.in_ports, session.out_ports, session.dialect

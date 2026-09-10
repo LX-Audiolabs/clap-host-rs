@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use clap_host_core::audio::{self, Session};
 use clap_host_core::clap_sys::plugin::clap_plugin;
-use clap_host_core::events::{self, Queue, RawMidi, UiEvent};
+use clap_host_core::events::{self, PluginOutEvent, Queue, RawMidi, UiEvent};
 use clap_host_core::host::{
     pump_main_thread, take_gui_closed, take_gui_hide_requested, take_gui_show_requested,
     take_preset_load_error, take_preset_loaded, take_requested_resize, take_restart_request,
@@ -69,6 +69,9 @@ struct Host {
     input_name: Option<String>,
     midi_q: Queue<RawMidi>,
     ui_q: Queue<UiEvent>,
+    /// Plugin → host param events, filled by the audio thread; drained by the
+    /// UI poll (Task 4).
+    out_q: Queue<PluginOutEvent>,
     session: Option<Session>,
     /// Sample rate / buffer size overrides chosen in the Setup dialog.
     settings: audio::StreamSettings,
@@ -244,6 +247,7 @@ pub fn run(
         input_name: input_name.map(str::to_owned),
         midi_q: events::queue(),
         ui_q: events::queue(),
+        out_q: events::queue(),
         session: None,
         settings,
         gui: None,
@@ -867,11 +871,12 @@ fn start_audio(ui: &HostWindow, host: &Rc<RefCell<Host>>, device: Option<&str>) 
     // Drop the old session first: it deactivates the plugin, which must happen
     // before activate() runs again.
     h.session = None;
-    let (plugin, input_name, midi_q, ui_q) = (
+    let (plugin, input_name, midi_q, ui_q, out_q) = (
         h.plugin(),
         h.input_name.clone(),
         Queue::clone(&h.midi_q),
         Queue::clone(&h.ui_q),
+        Queue::clone(&h.out_q),
     );
     match audio::open(
         plugin,
@@ -879,6 +884,7 @@ fn start_audio(ui: &HostWindow, host: &Rc<RefCell<Host>>, device: Option<&str>) 
         input_name.as_deref(),
         midi_q,
         ui_q,
+        out_q,
         &h.settings,
     ) {
         Ok(s) => {

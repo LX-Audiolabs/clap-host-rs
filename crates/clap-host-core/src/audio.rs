@@ -14,7 +14,9 @@ use clap_sys::{audio_buffer::clap_audio_buffer, plugin::clap_plugin, process::cl
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
-use crate::events::{Dialect, EvList, Queue, RawMidi, UiEvent, sink_output_events};
+use crate::events::{
+    Dialect, EvList, PluginOutEvent, Queue, RawMidi, UiEvent, capturing_output_events,
+};
 use crate::host::mark_audio_thread;
 use crate::loader::{self, PluginPtr};
 
@@ -54,6 +56,8 @@ pub struct Engine {
     param_cookies: Vec<(u32, *mut core::ffi::c_void)>,
     midi_rx: Queue<RawMidi>,
     ui_rx: Queue<UiEvent>,
+    /// Plugin → host param events captured from `process()` output events.
+    out_tx: Queue<PluginOutEvent>,
     dialect: Dialect,
     steady_time: i64,
     /// Interleaved f32 samples from the capture thread, or `None` for silence.
@@ -75,6 +79,8 @@ pub struct Engine {
 unsafe impl Send for Engine {}
 
 impl Engine {
+    // Eight constructor args (queues + stop flags) — a params struct would be ceremony.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         plugin: *const clap_plugin,
@@ -82,6 +88,7 @@ impl Engine {
         capture_buf: Option<Arc<ArrayQueue<f32>>>,
         midi_rx: Queue<RawMidi>,
         ui_rx: Queue<UiEvent>,
+        out_tx: Queue<PluginOutEvent>,
         stop: Arc<AtomicBool>,
         stopped: Arc<AtomicBool>,
     ) -> Self {
@@ -137,6 +144,7 @@ impl Engine {
                 .collect(),
             midi_rx,
             ui_rx,
+            out_tx,
             dialect: loader::note_dialect(plugin),
             steady_time: 0,
             capture_buf,
@@ -264,7 +272,7 @@ impl Engine {
         }
 
         let in_ev = self.events.as_input_events();
-        let out_ev = sink_output_events();
+        let out_ev = capturing_output_events(&self.out_tx);
 
         let proc = clap_process {
             steady_time: self.steady_time,
@@ -416,6 +424,7 @@ pub fn open(
     input_name: Option<&str>,
     midi_rx: Queue<RawMidi>,
     ui_rx: Queue<UiEvent>,
+    out_tx: Queue<PluginOutEvent>,
     settings: &StreamSettings,
 ) -> Result<Session, String> {
     let audio_host = cpal::default_host();
@@ -491,6 +500,7 @@ pub fn open(
             capture_buf.clone(),
             Queue::clone(&midi_rx),
             Queue::clone(&ui_rx),
+            Queue::clone(&out_tx),
             Arc::clone(&stop),
             Arc::clone(&stopped),
         )
@@ -679,6 +689,7 @@ mod tests {
             &raw const plugin,
             2,
             None,
+            crate::events::queue(),
             crate::events::queue(),
             crate::events::queue(),
             Arc::clone(&stop),
