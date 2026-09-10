@@ -9,11 +9,14 @@ use std::fs;
 use std::path::Path;
 use std::ptr;
 
-use clap_sys::ext::preset_load::{CLAP_EXT_PRESET_LOAD, clap_plugin_preset_load};
+use clap_sys::ext::preset_load::{
+    CLAP_EXT_PRESET_LOAD, CLAP_EXT_PRESET_LOAD_COMPAT, clap_plugin_preset_load,
+};
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::factory::preset_discovery::{
-    CLAP_PRESET_DISCOVERY_FACTORY_ID, CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN,
-    clap_preset_discovery_factory, clap_preset_discovery_indexer, clap_preset_discovery_location,
+    CLAP_PRESET_DISCOVERY_FACTORY_ID, CLAP_PRESET_DISCOVERY_LOCATION_FILE,
+    CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN, clap_preset_discovery_factory,
+    clap_preset_discovery_indexer, clap_preset_discovery_location,
     clap_preset_discovery_metadata_receiver, clap_preset_discovery_provider,
 };
 use clap_sys::plugin::clap_plugin;
@@ -244,4 +247,121 @@ pub fn pull(plugin: *const clap_plugin, key: &str, out: &Path) -> Result<(), Str
         out.display()
     );
     Ok(())
+}
+
+/// Does the plugin implement `clap.preset-load` (either version string)?
+/// Unlike `pull` (preset.rs:200), which uses the final `/2` only, this also
+/// tries the draft compat id — some shipped plugins still answer to it.
+#[must_use]
+pub fn load_file_available(plugin: *const clap_plugin) -> bool {
+    loader::plugin_ext(plugin, CLAP_EXT_PRESET_LOAD)
+        .or_else(|| loader::plugin_ext(plugin, CLAP_EXT_PRESET_LOAD_COMPAT))
+        .is_some()
+}
+
+/// Ask the plugin to load a preset *file* via `preset-load` — for formats
+/// only the plugin itself understands. This is the sibling of `pull`
+/// (factory key → state blob); here the host hands over a file path and the
+/// plugin applies the preset in place. Main thread only.
+pub fn load_file(plugin: *const clap_plugin, path: &Path) -> Result<(), String> {
+    let raw = loader::plugin_ext(plugin, CLAP_EXT_PRESET_LOAD)
+        .or_else(|| loader::plugin_ext(plugin, CLAP_EXT_PRESET_LOAD_COMPAT))
+        .ok_or("plugin has no clap.preset-load")?;
+    let ext = unsafe { &*raw.cast::<clap_plugin_preset_load>() };
+    let from_location = ext
+        .from_location
+        .ok_or("preset-load.from_location is null")?;
+    // Non-UTF-8 paths degrade via lossy conversion; interior NUL fails cleanly.
+    let path_c = CString::new(path.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
+    if unsafe {
+        from_location(
+            plugin,
+            CLAP_PRESET_DISCOVERY_LOCATION_FILE,
+            path_c.as_ptr(),
+            ptr::null(),
+        )
+    } {
+        Ok(())
+    } else {
+        Err(format!("preset-load rejected {}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap_sys::factory::preset_discovery::clap_preset_discovery_location_kind;
+    use std::sync::Mutex;
+
+    static CALL: Mutex<Option<(clap_preset_discovery_location_kind, String)>> = Mutex::new(None);
+
+    unsafe extern "C" fn fake_from_location(
+        _: *const clap_plugin,
+        location_kind: clap_preset_discovery_location_kind,
+        location: *const c_char,
+        load_key: *const c_char,
+    ) -> bool {
+        let loc = if location.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(location) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        *CALL.lock().unwrap() = Some((location_kind, loc));
+        load_key.is_null()
+    }
+
+    static FAKE_PRESET_LOAD: clap_plugin_preset_load = clap_plugin_preset_load {
+        from_location: Some(fake_from_location),
+    };
+
+    unsafe extern "C" fn fake_get_extension(
+        _: *const clap_plugin,
+        id: *const c_char,
+    ) -> *const c_void {
+        if !id.is_null() && unsafe { CStr::from_ptr(id) } == CLAP_EXT_PRESET_LOAD {
+            ptr::from_ref(&FAKE_PRESET_LOAD).cast()
+        } else {
+            ptr::null()
+        }
+    }
+
+    fn fake_plugin() -> clap_plugin {
+        clap_plugin {
+            get_extension: Some(fake_get_extension),
+            on_main_thread: None,
+            ..unsafe { std::mem::zeroed() }
+        }
+    }
+
+    #[test]
+    fn load_file_uses_file_location_and_null_load_key() {
+        let plugin = fake_plugin();
+        let path = Path::new("C:/tmp/init.clap-preset");
+        assert!(load_file_available(&raw const plugin));
+        assert!(load_file(&raw const plugin, path).is_ok());
+        let (kind, loc) = CALL.lock().unwrap().take().expect("from_location called");
+        assert_eq!(kind, CLAP_PRESET_DISCOVERY_LOCATION_FILE);
+        assert_eq!(loc, "C:/tmp/init.clap-preset");
+    }
+
+    unsafe extern "C" fn null_get_extension(
+        _: *const clap_plugin,
+        _: *const c_char,
+    ) -> *const c_void {
+        ptr::null()
+    }
+
+    #[test]
+    fn load_file_errors_without_extension() {
+        let plugin = clap_plugin {
+            get_extension: Some(null_get_extension),
+            on_main_thread: None,
+            ..unsafe { std::mem::zeroed() }
+        };
+        assert!(!load_file_available(&raw const plugin));
+        let err = load_file(&raw const plugin, Path::new("x.clap-preset")).unwrap_err();
+        assert!(err.contains("preset-load"));
+    }
 }
