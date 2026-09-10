@@ -21,11 +21,13 @@ use clap_host_core::clap_sys::plugin::clap_plugin;
 use clap_host_core::events::{self, Queue, RawMidi, UiEvent};
 use clap_host_core::host::{
     pump_main_thread, take_gui_closed, take_gui_hide_requested, take_gui_show_requested,
-    take_requested_resize, take_restart_request, take_state_dirty,
+    take_preset_load_error, take_preset_loaded, take_requested_resize, take_restart_request,
+    take_state_dirty,
 };
 use clap_host_core::loader::{self, ParamInfo, PluginPtr};
 use clap_host_core::midi;
 use clap_host_core::plugin_gui::{FloatingGui, supports_floating};
+use clap_host_core::preset;
 use clap_host_core::state;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
@@ -265,6 +267,7 @@ pub fn run(
     #[cfg(not(windows))]
     let can_embed = false;
     ui.set_gui_available(supports_floating(plugin) || can_embed);
+    ui.set_preset_load_available(preset::load_file_available(plugin));
 
     let devices = audio::output_devices();
     let ports = midi::port_names();
@@ -538,6 +541,32 @@ pub fn run(
             }
         });
     }
+    {
+        let (host, ui_w, params_model) = (Rc::clone(&host), ui.as_weak(), Rc::clone(&params_model));
+        ui.on_load_preset(move || {
+            let Some(ui) = ui_w.upgrade() else { return };
+            // Blocking native dialog: the 50 ms timer pauses while it is
+            // open — fine for a dev host, and pick_file returns None on cancel.
+            let Some(file) = rfd::FileDialog::new()
+                .set_title("Load plugin preset")
+                .add_filter("CLAP preset", &["clap-preset"])
+                .add_filter("All files", &["*"])
+                .pick_file()
+            else { return };
+            let h = host.borrow();
+            match preset::load_file(h.plugin(), &file) {
+                Ok(()) => {
+                    ui.set_log_text(SharedString::from(format!("preset loaded: {}", file.display())));
+                    drop(h);
+                    // The plugin changed param values; refresh the model like
+                    // on_load_state does (gui.rs:463-464).
+                    let filter = ui.get_param_filter();
+                    params_model.set_vec(param_rows_filtered(&host.borrow(), filter.as_str()));
+                }
+                Err(e) => ui.set_log_text(SharedString::from(format!("load preset: {e}"))),
+            }
+        });
+    }
 
     // One timer drives everything the plugin expects from the main thread.
     let timer = slint::Timer::default();
@@ -577,6 +606,14 @@ pub fn run(
             }
             if take_state_dirty() {
                 ui.set_state_dirty(true);
+            }
+            if take_preset_loaded() {
+                let filter = ui.get_param_filter();
+                params_model.set_vec(param_rows_filtered(&host.borrow(), filter.as_str()));
+                ui.set_log_text(SharedString::from("preset loaded"));
+            }
+            if let Some(err) = take_preset_load_error() {
+                ui.set_log_text(SharedString::from(err));
             }
             if clap_host_core::host::take_remote_controls_dirty() {
                 let mut h = host.borrow_mut();
