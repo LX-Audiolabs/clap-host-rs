@@ -218,7 +218,8 @@ mod tests {
         let p = fake_plugin();
         set_current_plugin(&raw const p);
         // Claim-Loop-Pfad: mehr Tasks als Worker — jeder Worker zieht sich
-        // nacheinander mehrere Tasks. Deterministisch: n fest aus worker_count.
+        // nacheinander mehrere Tasks. n wird zur Laufzeit aus worker_count
+        // abgeleitet, um den Pfad maschinenunabhängig zu erzwingen.
         let n = (worker_count() * 2) as u32;
         assert!(n > 1, "pool should have at least 2 workers for this test");
         assert!(request_exec(n));
@@ -242,6 +243,41 @@ mod tests {
         init();
         let p = clap_plugin {
             get_extension: Some(null_get_extension),
+            on_main_thread: None,
+            ..unsafe { std::mem::zeroed() }
+        };
+        set_current_plugin(&raw const p);
+        assert!(!request_exec(2));
+        set_current_plugin(ptr::null());
+    }
+
+    #[test]
+    fn request_exec_false_without_current_plugin() {
+        let _g = TEST_LOCK.lock().unwrap();
+        init();
+        set_current_plugin(ptr::null());
+        assert!(!request_exec(2));
+    }
+
+    static FAKE_POOL_NO_EXEC: clap_plugin_thread_pool = clap_plugin_thread_pool { exec: None };
+
+    unsafe extern "C" fn no_exec_get_extension(
+        _: *const clap_plugin,
+        id: *const c_char,
+    ) -> *const c_void {
+        if !id.is_null() && unsafe { CStr::from_ptr(id) } == CLAP_EXT_THREAD_POOL {
+            ptr::from_ref(&FAKE_POOL_NO_EXEC).cast()
+        } else {
+            ptr::null()
+        }
+    }
+
+    #[test]
+    fn request_exec_false_when_exec_is_none() {
+        let _g = TEST_LOCK.lock().unwrap();
+        init();
+        let p = clap_plugin {
+            get_extension: Some(no_exec_get_extension),
             on_main_thread: None,
             ..unsafe { std::mem::zeroed() }
         };
