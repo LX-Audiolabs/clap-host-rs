@@ -383,4 +383,53 @@ mod tests {
         assert!(unsafe { (out.try_push.unwrap())(&raw const out, ptr::from_ref(&note.header)) });
         assert!(q.pop().is_none());
     }
+
+    #[test]
+    fn capturing_output_returns_false_when_queue_is_full() {
+        let q = queue::<PluginOutEvent>();
+        let out = capturing_output_events(&q);
+        let val = clap_event_param_value {
+            header: header(
+                CLAP_EVENT_PARAM_VALUE,
+                size_of::<clap_event_param_value>(),
+                0,
+            ),
+            param_id: 7,
+            cookie: ptr::null_mut(),
+            note_id: -1,
+            port_index: -1,
+            channel: -1,
+            key: -1,
+            value: 0.5,
+        };
+        for _ in 0..QUEUE_CAP {
+            assert!(unsafe { (out.try_push.unwrap())(&raw const out, ptr::from_ref(&val.header)) });
+        }
+        assert!(!unsafe { (out.try_push.unwrap())(&raw const out, ptr::from_ref(&val.header)) });
+    }
+
+    #[test]
+    fn capturing_output_tolerates_undersized_and_null_headers() {
+        let q = queue::<PluginOutEvent>();
+        let out = capturing_output_events(&q);
+        let undersized = clap_event_param_value {
+            header: header(CLAP_EVENT_PARAM_VALUE, size_of::<clap_event_header>(), 0),
+            param_id: 7,
+            cookie: ptr::null_mut(),
+            note_id: -1,
+            port_index: -1,
+            channel: -1,
+            key: -1,
+            value: 0.5,
+        };
+        // Size-Check schlägt zu: tolerant true, aber nichts gepusht.
+        assert!(unsafe {
+            (out.try_push.unwrap())(&raw const out, ptr::from_ref(&undersized.header))
+        });
+        assert!(q.pop().is_none());
+        // Null-Header / -Liste: false.
+        assert!(!unsafe { (out.try_push.unwrap())(&raw const out, ptr::null()) });
+        let sink = sink_output_events();
+        assert!(!unsafe { (out.try_push.unwrap())(&raw const sink, ptr::null()) });
+    }
 }
