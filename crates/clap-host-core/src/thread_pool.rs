@@ -209,6 +209,26 @@ mod tests {
         set_current_plugin(ptr::null());
     }
 
+    #[test]
+    fn request_exec_more_tasks_than_workers() {
+        let _g = TEST_LOCK.lock().unwrap();
+        init();
+        EXEC_COUNT.store(0, Ordering::SeqCst);
+        SEEN_INDEXES.lock().unwrap().clear();
+        let p = fake_plugin();
+        set_current_plugin(&raw const p);
+        // Claim-Loop-Pfad: mehr Tasks als Worker — jeder Worker zieht sich
+        // nacheinander mehrere Tasks. Deterministisch: n fest aus worker_count.
+        let n = (worker_count() * 2) as u32;
+        assert!(n > 1, "pool should have at least 2 workers for this test");
+        assert!(request_exec(n));
+        assert_eq!(EXEC_COUNT.load(Ordering::SeqCst), n);
+        let mut idxs = SEEN_INDEXES.lock().unwrap().clone();
+        idxs.sort_unstable();
+        assert_eq!(idxs, (0..n).collect::<Vec<_>>());
+        set_current_plugin(ptr::null());
+    }
+
     unsafe extern "C" fn null_get_extension(
         _: *const clap_plugin,
         _: *const c_char,
