@@ -13,8 +13,9 @@ use crossbeam_queue::ArrayQueue;
 use clap_sys::{
     events::{
         CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_IS_LIVE, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_OFF,
-        CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_VALUE, clap_event_header, clap_event_midi,
-        clap_event_note, clap_event_param_value, clap_input_events, clap_output_events,
+        CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
+        CLAP_EVENT_PARAM_VALUE, clap_event_header, clap_event_midi, clap_event_note,
+        clap_event_param_gesture, clap_event_param_value, clap_input_events, clap_output_events,
     },
     id::clap_id,
 };
@@ -30,6 +31,15 @@ pub const QUEUE_CAP: usize = 1024;
 pub enum UiEvent {
     Param { id: clap_id, value: f64 },
     Midi(RawMidi),
+}
+
+/// Plugin → host events we care about (param feedback). Copied out of
+/// `clap_process.out_events` / `params.flush` on the producing thread.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum PluginOutEvent {
+    Value { id: clap_id, value: f64 },
+    GestureBegin { id: clap_id },
+    GestureEnd { id: clap_id },
 }
 
 /// Lock-free MPMC queue. Shared by `Arc` rather than split into producer and
@@ -213,6 +223,59 @@ pub fn sink_output_events() -> clap_output_events {
     }
 }
 
+unsafe extern "C" fn ev_try_push_capture(
+    list: *const clap_output_events,
+    header: *const clap_event_header,
+) -> bool {
+    if list.is_null() || header.is_null() {
+        return false;
+    }
+    let q = unsafe { &*(*list).ctx.cast::<ArrayQueue<PluginOutEvent>>() };
+    let h = unsafe { &*header };
+    if h.space_id != CLAP_CORE_EVENT_SPACE_ID {
+        return true;
+    }
+    let ev = match h.type_ {
+        CLAP_EVENT_PARAM_VALUE => {
+            if (h.size as usize) < size_of::<clap_event_param_value>() {
+                return true;
+            }
+            let p = unsafe { &*header.cast::<clap_event_param_value>() };
+            PluginOutEvent::Value {
+                id: p.param_id,
+                value: p.value,
+            }
+        }
+        CLAP_EVENT_PARAM_GESTURE_BEGIN => {
+            if (h.size as usize) < size_of::<clap_event_param_gesture>() {
+                return true;
+            }
+            let p = unsafe { &*header.cast::<clap_event_param_gesture>() };
+            PluginOutEvent::GestureBegin { id: p.param_id }
+        }
+        CLAP_EVENT_PARAM_GESTURE_END => {
+            if (h.size as usize) < size_of::<clap_event_param_gesture>() {
+                return true;
+            }
+            let p = unsafe { &*header.cast::<clap_event_param_gesture>() };
+            PluginOutEvent::GestureEnd { id: p.param_id }
+        }
+        _ => return true,
+    };
+    q.push(ev).is_ok()
+}
+
+/// Output list that forwards param value/gesture events into `q`.
+/// `q` must outlive the `clap_process` / `params.flush` call.
+#[must_use]
+pub fn capturing_output_events(q: &Queue<PluginOutEvent>) -> clap_output_events {
+    clap_output_events {
+        // ArrayQueue behind the Arc — stable address for the call.
+        ctx: Arc::as_ptr(q).cast::<c_void>().cast_mut(),
+        try_push: Some(ev_try_push_capture),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +314,73 @@ mod tests {
         assert_eq!(times, vec![0, 1, 2, 3]);
 
         assert!(unsafe { ev_get(&raw const list, 4) }.is_null());
+    }
+
+    #[test]
+    fn capturing_output_keeps_param_value_and_gestures() {
+        let q = queue::<PluginOutEvent>();
+        let out = capturing_output_events(&q);
+
+        let val = clap_event_param_value {
+            header: header(
+                CLAP_EVENT_PARAM_VALUE,
+                size_of::<clap_event_param_value>(),
+                0,
+            ),
+            param_id: 42,
+            cookie: ptr::null_mut(),
+            note_id: -1,
+            port_index: -1,
+            channel: -1,
+            key: -1,
+            value: 0.75,
+        };
+        let begin = clap_event_param_gesture {
+            header: header(
+                CLAP_EVENT_PARAM_GESTURE_BEGIN,
+                size_of::<clap_event_param_gesture>(),
+                0,
+            ),
+            param_id: 42,
+        };
+        let end = clap_event_param_gesture {
+            header: header(
+                CLAP_EVENT_PARAM_GESTURE_END,
+                size_of::<clap_event_param_gesture>(),
+                0,
+            ),
+            param_id: 42,
+        };
+
+        assert!(unsafe { (out.try_push.unwrap())(&raw const out, ptr::from_ref(&val.header)) });
+        assert!(unsafe { (out.try_push.unwrap())(&raw const out, ptr::from_ref(&begin.header)) });
+        assert!(unsafe { (out.try_push.unwrap())(&raw const out, ptr::from_ref(&end.header)) });
+
+        assert_eq!(
+            q.pop(),
+            Some(PluginOutEvent::Value {
+                id: 42,
+                value: 0.75
+            })
+        );
+        assert_eq!(q.pop(), Some(PluginOutEvent::GestureBegin { id: 42 }));
+        assert_eq!(q.pop(), Some(PluginOutEvent::GestureEnd { id: 42 }));
+        assert!(q.pop().is_none());
+    }
+
+    #[test]
+    fn capturing_output_ignores_unknown_types_but_returns_true() {
+        let q = queue::<PluginOutEvent>();
+        let out = capturing_output_events(&q);
+        let note = clap_event_note {
+            header: header(CLAP_EVENT_NOTE_ON, size_of::<clap_event_note>(), 0),
+            note_id: -1,
+            port_index: 0,
+            channel: 0,
+            key: 60,
+            velocity: 1.0,
+        };
+        assert!(unsafe { (out.try_push.unwrap())(&raw const out, ptr::from_ref(&note.header)) });
+        assert!(q.pop().is_none());
     }
 }
