@@ -14,5 +14,6 @@ pub mod preset;
 pub mod remote_controls;
 pub mod scan;
 pub mod state;
+pub mod thread_pool;
 #[cfg(windows)]
 pub mod win32_embed;
