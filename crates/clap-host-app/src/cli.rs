@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: clap-host-rs [--scan | --plugin <path.clap> [--id <clap-id>] \
+pub const USAGE: &str = "usage: clap-host-rs [--pick | --scan | --plugin <path.clap> [--id <clap-id>] \
                          [--list-params] [--list-presets] \
                          [--pull-preset <key> --out <file>] [--set <id>=<val>]... \
                          [--load-state <file>] [--save-state <file>] \
@@ -20,6 +20,7 @@ pub struct Args {
     pub plugin_id: Option<String>,
     pub scan: bool,
     pub play: bool,
+    pub pick: bool,
     pub gui: bool,
     pub output_device: Option<String>,
     pub input_device: Option<String>,
@@ -41,8 +42,12 @@ pub struct Args {
 pub fn parse_args() -> Args {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() {
-        eprintln!("{USAGE}");
-        std::process::exit(1);
+        // Bare `clap-host-rs` opens the interactive plugin picker; main
+        // falls back to usage+exit when stdin is not a TTY.
+        return Args {
+            pick: true,
+            ..Args::default()
+        };
     }
 
     let mut a = Args::default();
@@ -111,6 +116,7 @@ pub fn parse_args() -> Args {
             }
             "--list-params" => a.list_params = true,
             "--scan" => a.scan = true,
+            "--pick" => a.pick = true,
             "--list-presets" => a.list_presets = true,
             "--play" => a.play = true,
             "--gui" => a.gui = true,
