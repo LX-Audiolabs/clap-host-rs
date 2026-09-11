@@ -73,3 +73,10 @@ Notation: `HOST` = `target/debug/clap-host-rs` (or `target/release/clap-host-rs`
 24. [ ] `cargo clippy --workspace --all-targets -- -D warnings` — no warnings.
 25. [ ] **Param-Feedback**: Regler im Plugin-Editor bewegen → Host-Slider folgt
         innerhalb ~50 ms.
+
+## Picker
+
+26. [ ] **Picker**: bare `HOST` (oder `HOST --pick`) listet die gefundenen
+        Plugins nummeriert; Texteingabe filtert die Liste, die gewählte Zahl
+        öffnet die GUI mit dem gewählten Plugin. Bei piped stdin statt TTY:
+        Usage-Meldung und Exit-Code 1.

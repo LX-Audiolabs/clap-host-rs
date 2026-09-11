@@ -3,6 +3,7 @@
 //! Phase 1 is the CLI (params, presets, MIDI, audio).
 //!
 //! Usage:
+//!   clap-host-rs [--pick] — bare invocation opens the interactive plugin picker
 //!   clap-host-rs --plugin <path.clap> [--id <clap-id>] [--list-params]
 //!                [--list-presets] [--pull-preset <key> --out <file>]
 //!                [--set <id>=<val>]... [--load-state <file>]
@@ -14,6 +15,7 @@
 
 mod cli;
 mod gui;
+mod picker;
 
 use std::ffi::CStr;
 use std::path::Path;
@@ -30,7 +32,21 @@ use clap_host_core::state;
 use clap_host_core::clap_sys::plugin::clap_plugin;
 
 fn main() {
-    let args = cli::parse_args();
+    let mut args = cli::parse_args();
+    if args.pick {
+        // TTY only — piped stdin keeps the old usage-and-exit behavior so
+        // scripts don't end up in an interactive loop reading EOF forever.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            eprintln!("{}", cli::USAGE);
+            std::process::exit(1);
+        }
+        let Some((path, id)) = picker::pick() else {
+            return;
+        };
+        args.plugin_path = Some(path);
+        args.plugin_id = Some(id);
+        args.gui = true; // the picker always opens the GUI
+    }
 
     if args.list_midi {
         print_midi_ports();
