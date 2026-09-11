@@ -117,7 +117,12 @@ mod tests {
         let path = "C:/Program Files/Common/CLAP/Vital.clap";
         assert!(entry_matches("Vital", "com.vital", path, "vital"));
         assert!(entry_matches("Vital", "com.vital", path, "VITAL"));
-        assert!(entry_matches("Surge XT", "com.surge", "C:/CLAP/Surge.clap", "surge clap"));
+        assert!(entry_matches(
+            "Surge XT",
+            "com.surge",
+            "C:/CLAP/Surge.clap",
+            "surge clap"
+        ));
         assert!(!entry_matches("Vital", "com.vital", path, "surge"));
         assert!(!entry_matches("Vital", "com.vital", path, "vital surge"));
     }

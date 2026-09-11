@@ -14,8 +14,8 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod cli;
-mod picker;
 mod gui;
+mod picker;
 
 use std::ffi::CStr;
 use std::path::Path;
@@ -40,7 +40,9 @@ fn main() {
             eprintln!("{}", cli::USAGE);
             std::process::exit(1);
         }
-        let Some((path, id)) = picker::pick() else { return };
+        let Some((path, id)) = picker::pick() else {
+            return;
+        };
         args.plugin_path = Some(path);
         args.plugin_id = Some(id);
         args.gui = true; // the picker always opens the GUI
