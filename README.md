@@ -7,6 +7,17 @@ implementation plan and GUI follow-ups in `planning/` are fully implemented
 (see the "Umsetzungsstand" section at the top of each plan); deferred items
 are listed under Follow-ups below.
 
+## Quickstart
+
+```bash
+cargo run -p clap-host-app
+```
+
+Without arguments the host scans the standard CLAP directories and opens
+the interactive plugin picker: the found plugins are listed with numbers —
+type a number to open the GUI with the chosen plugin, type text to filter
+the list, Enter or q to quit.
+
 ## Build & test
 
 ```bash
@@ -35,7 +46,7 @@ unaffected.
 ## CLI
 
 ```
-clap-host-rs [--scan | --plugin <path.clap> [--id <clap-id>]
+clap-host-rs [ --pick | --scan | --plugin <path.clap> [--id <clap-id>]
              [--list-params] [--list-presets]
              [--pull-preset <key> --out <file>] [--set <id>=<val>]...
              [--load-state <file>] [--save-state <file>]
@@ -45,6 +56,11 @@ clap-host-rs [--scan | --plugin <path.clap> [--id <clap-id>]
              [--list-midi] [--midi-in <name>]] [--list-devices]
 ```
 
+- (no args) or `--pick` — scan the standard CLAP dirs and show an
+  interactive, numbered list of the plugins found (one row per plugin in
+  multi-plugin bundles). Type a number to open the GUI with that plugin,
+  type text to filter the list; Enter or q quits. Needs a TTY — with piped
+  stdin the usage message is printed and the process exits with code 1.
 - `--scan` — walk the OS standard CLAP dirs and list found plugins. The
   `CLAP_PATH` env var (`;`-separated on Windows, `:` elsewhere) adds extra
   search dirs, per the CLAP spec.
