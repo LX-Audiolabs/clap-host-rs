@@ -38,6 +38,7 @@ use clap_sys::{
     version::CLAP_VERSION,
 };
 use crossbeam_queue::ArrayQueue;
+use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 use std::sync::LazyLock;
@@ -54,11 +55,29 @@ use std::time::{Duration, Instant};
 // ---------------------------------------------------------------------------
 
 static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
-static AUDIO_THREAD: OnceLock<ThreadId> = OnceLock::new();
+thread_local! {
+    static IN_AUDIO_CALLBACK: Cell<bool> = const { Cell::new(false) };
+}
 
-/// Called once from the cpal callback so `is_audio_thread` can answer honestly.
+/// Marks only the active process/start/stop call as an audio-thread scope.
+pub(crate) struct AudioThreadGuard(bool);
+
+impl AudioThreadGuard {
+    pub(crate) fn enter() -> Self {
+        Self(IN_AUDIO_CALLBACK.with(|active| active.replace(true)))
+    }
+}
+
+impl Drop for AudioThreadGuard {
+    fn drop(&mut self) {
+        IN_AUDIO_CALLBACK.with(|active| active.set(self.0));
+    }
+}
+
+/// Mark a caller-managed audio thread. Engine callbacks use a scoped guard;
+/// external callers of this legacy API keep the marker until their thread exits.
 pub fn mark_audio_thread() {
-    let _ = AUDIO_THREAD.set(std::thread::current().id());
+    IN_AUDIO_CALLBACK.with(|active| active.set(true));
 }
 
 unsafe extern "C" fn host_log(
@@ -88,7 +107,7 @@ unsafe extern "C" fn host_is_main_thread(_: *const clap_host) -> bool {
 }
 
 unsafe extern "C" fn host_is_audio_thread(_: *const clap_host) -> bool {
-    AUDIO_THREAD.get() == Some(&std::thread::current().id())
+    IN_AUDIO_CALLBACK.with(Cell::get)
 }
 
 /// Set by `request_callback`; drained on the main thread by [`pump_main_thread`].
@@ -732,5 +751,24 @@ mod tests {
         }
         let unknown = c"clap.definitely-not-real";
         assert!(unsafe { get(host, unknown.as_ptr()) }.is_null());
+    }
+
+    #[test]
+    fn audio_thread_check_tracks_each_processing_scope() {
+        let is_audio = || unsafe { host_is_audio_thread(ptr::null()) };
+        assert!(!is_audio());
+        {
+            let _scope = AudioThreadGuard::enter();
+            assert!(is_audio());
+        }
+        assert!(!is_audio());
+        std::thread::spawn(|| {
+            assert!(!unsafe { host_is_audio_thread(ptr::null()) });
+            let _scope = AudioThreadGuard::enter();
+            assert!(unsafe { host_is_audio_thread(ptr::null()) });
+        })
+        .join()
+        .unwrap();
+        assert!(!is_audio());
     }
 }

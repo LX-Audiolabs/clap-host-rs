@@ -115,11 +115,21 @@ impl EvList {
     /// Translate one raw MIDI message into the plugin's preferred dialect.
     /// Messages the dialect cannot express are dropped.
     pub fn push_midi(&mut self, msg: RawMidi, dialect: Dialect, time: u32) {
+        self.push_midi_with_flags(msg, dialect, time, CLAP_EVENT_IS_LIVE);
+    }
+
+    /// Push a timed MIDI message, preserving its source flags.
+    pub fn push_midi_with_flags(&mut self, msg: RawMidi, dialect: Dialect, time: u32, flags: u32) {
         match dialect {
             Dialect::None => {}
             Dialect::Midi => self.items.push(EvStorage {
                 midi: clap_event_midi {
-                    header: header(CLAP_EVENT_MIDI, size_of::<clap_event_midi>(), time),
+                    header: header_with_flags(
+                        CLAP_EVENT_MIDI,
+                        size_of::<clap_event_midi>(),
+                        time,
+                        flags,
+                    ),
                     port_index: 0,
                     data: msg,
                 },
@@ -138,7 +148,7 @@ impl EvList {
                 };
                 self.items.push(EvStorage {
                     note: clap_event_note {
-                        header: header(type_, size_of::<clap_event_note>(), time),
+                        header: header_with_flags(type_, size_of::<clap_event_note>(), time, flags),
                         note_id: -1,
                         port_index: 0,
                         channel,
@@ -167,12 +177,16 @@ impl EvList {
 }
 
 fn header(type_: u16, size: usize, time: u32) -> clap_event_header {
+    header_with_flags(type_, size, time, CLAP_EVENT_IS_LIVE)
+}
+
+fn header_with_flags(type_: u16, size: usize, time: u32, flags: u32) -> clap_event_header {
     clap_event_header {
         size: size as u32,
         time,
         space_id: CLAP_CORE_EVENT_SPACE_ID,
         type_,
-        flags: CLAP_EVENT_IS_LIVE,
+        flags,
     }
 }
 
