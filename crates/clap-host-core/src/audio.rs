@@ -7,7 +7,7 @@
 
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use clap_sys::{
@@ -27,6 +27,113 @@ use crate::loader::{self, PluginPtr};
 pub const MAX_FRAMES: usize = 4096;
 /// Maximum number of timed events accepted in one preallocated block.
 pub const MAX_TIMED_EVENTS: usize = 256;
+
+/// Opt-in observations of output callbacks. Durations are microseconds.
+#[cfg(feature = "realtime-probe")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProbeSnapshot {
+    pub first_frames: u64,
+    pub min_frames: u64,
+    pub max_frames: u64,
+    pub max_gap_us: u64,
+    pub max_work_us: u64,
+    pub nonzero_callbacks: u64,
+}
+
+#[cfg(feature = "realtime-probe")]
+struct ProbeCounters {
+    first_frames: AtomicU64,
+    min_frames: AtomicU64,
+    max_frames: AtomicU64,
+    max_gap_us: AtomicU64,
+    max_work_us: AtomicU64,
+    nonzero_callbacks: AtomicU64,
+}
+
+#[cfg(feature = "realtime-probe")]
+impl Default for ProbeCounters {
+    fn default() -> Self {
+        Self {
+            first_frames: AtomicU64::new(0),
+            min_frames: AtomicU64::new(u64::MAX),
+            max_frames: AtomicU64::new(0),
+            max_gap_us: AtomicU64::new(0),
+            max_work_us: AtomicU64::new(0),
+            nonzero_callbacks: AtomicU64::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "realtime-probe")]
+impl ProbeCounters {
+    fn record(&self, frames: u64, gap_us: Option<u64>, work_us: u64, nonzero: bool) {
+        let _ = self
+            .first_frames
+            .compare_exchange(0, frames, Ordering::Relaxed, Ordering::Relaxed);
+        self.min_frames.fetch_min(frames, Ordering::Relaxed);
+        self.max_frames.fetch_max(frames, Ordering::Relaxed);
+        if let Some(gap) = gap_us {
+            self.max_gap_us.fetch_max(gap, Ordering::Relaxed);
+        }
+        self.max_work_us.fetch_max(work_us, Ordering::Relaxed);
+        if nonzero {
+            self.nonzero_callbacks.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn snapshot(&self) -> ProbeSnapshot {
+        let min = self.min_frames.load(Ordering::Relaxed);
+        ProbeSnapshot {
+            first_frames: self.first_frames.load(Ordering::Relaxed),
+            min_frames: if min == u64::MAX { 0 } else { min },
+            max_frames: self.max_frames.load(Ordering::Relaxed),
+            max_gap_us: self.max_gap_us.load(Ordering::Relaxed),
+            max_work_us: self.max_work_us.load(Ordering::Relaxed),
+            nonzero_callbacks: self.nonzero_callbacks.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[cfg(feature = "realtime-probe")]
+struct CallbackProbe {
+    counters: Arc<ProbeCounters>,
+    previous: Option<Instant>,
+}
+
+#[cfg(feature = "realtime-probe")]
+impl CallbackProbe {
+    fn new(counters: Arc<ProbeCounters>) -> Self {
+        Self {
+            counters,
+            previous: None,
+        }
+    }
+
+    fn begin(&mut self) -> (Instant, Option<u64>) {
+        let now = Instant::now();
+        let gap = self
+            .previous
+            .map(|previous| now.duration_since(previous).as_micros() as u64);
+        self.previous = Some(now);
+        (now, gap)
+    }
+
+    fn finish<T: PartialEq + Default>(
+        &self,
+        started: Instant,
+        gap_us: Option<u64>,
+        data: &[T],
+        channels: usize,
+    ) {
+        let work_us = started.elapsed().as_micros() as u64;
+        self.counters.record(
+            (data.len() / channels) as u64,
+            gap_us,
+            work_us,
+            data.iter().any(|sample| *sample != T::default()),
+        );
+    }
+}
 
 /// One MIDI event at a sample offset in the next `process_timed` block.
 #[derive(Clone, Copy, Debug)]
@@ -613,11 +720,36 @@ pub struct Session {
     /// handshake (owned by the engine inside the stream callback).
     stop: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
+    callbacks: Arc<AtomicU64>,
+    stream_errors: Arc<AtomicU64>,
+    #[cfg(feature = "realtime-probe")]
+    probe_counters: Arc<ProbeCounters>,
     pub sample_rate: f64,
     pub device_channels: usize,
     pub in_ports: Vec<u32>,
     pub out_ports: Vec<u32>,
     pub dialect: Dialect,
+}
+
+impl Session {
+    /// Number of output callbacks delivered since this stream started.
+    #[must_use]
+    pub fn callback_count(&self) -> u64 {
+        self.callbacks.load(Ordering::Relaxed)
+    }
+
+    /// Number of output stream errors reported by the backend.
+    #[must_use]
+    pub fn stream_error_count(&self) -> u64 {
+        self.stream_errors.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot of opt-in output callback measurements.
+    #[cfg(feature = "realtime-probe")]
+    #[must_use]
+    pub fn probe_snapshot(&self) -> ProbeSnapshot {
+        self.probe_counters.snapshot()
+    }
 }
 
 impl Drop for Session {
@@ -719,6 +851,10 @@ pub fn open(
 
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = Arc::new(AtomicBool::new(false));
+    let callbacks = Arc::new(AtomicU64::new(0));
+    let stream_errors = Arc::new(AtomicU64::new(0));
+    #[cfg(feature = "realtime-probe")]
+    let probe_counters = Arc::new(ProbeCounters::default());
     let mk_engine = || {
         Engine::new(
             plugin,
@@ -737,24 +873,54 @@ pub fn open(
 
     let build = |engine: Engine, buffer_size: cpal::BufferSize| {
         let mut engine = engine;
+        let callback_count = Arc::clone(&callbacks);
+        let error_count = Arc::clone(&stream_errors);
         let stream_config = cpal::StreamConfig {
             channels: config.channels(),
             sample_rate,
             buffer_size,
         };
         match format {
-            cpal::SampleFormat::F32 => device.build_output_stream::<f32, _, _>(
-                stream_config,
-                move |data: &mut [f32], _| engine.process(data),
-                |e| eprintln!("audio error: {e}"),
-                None,
-            ),
-            cpal::SampleFormat::I32 => device.build_output_stream::<i32, _, _>(
-                stream_config,
-                move |data: &mut [i32], _| engine.process_i32(data),
-                |e| eprintln!("audio error: {e}"),
-                None,
-            ),
+            cpal::SampleFormat::F32 => {
+                #[cfg(feature = "realtime-probe")]
+                let mut probe = CallbackProbe::new(Arc::clone(&probe_counters));
+                device.build_output_stream::<f32, _, _>(
+                    stream_config,
+                    move |data: &mut [f32], _| {
+                        #[cfg(feature = "realtime-probe")]
+                        let (started, gap_us) = probe.begin();
+                        engine.process(data);
+                        #[cfg(feature = "realtime-probe")]
+                        probe.finish(started, gap_us, data, device_channels);
+                        callback_count.fetch_add(1, Ordering::Relaxed);
+                    },
+                    move |e| {
+                        error_count.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("audio error: {e}");
+                    },
+                    None,
+                )
+            }
+            cpal::SampleFormat::I32 => {
+                #[cfg(feature = "realtime-probe")]
+                let mut probe = CallbackProbe::new(Arc::clone(&probe_counters));
+                device.build_output_stream::<i32, _, _>(
+                    stream_config,
+                    move |data: &mut [i32], _| {
+                        #[cfg(feature = "realtime-probe")]
+                        let (started, gap_us) = probe.begin();
+                        engine.process_i32(data);
+                        #[cfg(feature = "realtime-probe")]
+                        probe.finish(started, gap_us, data, device_channels);
+                        callback_count.fetch_add(1, Ordering::Relaxed);
+                    },
+                    move |e| {
+                        error_count.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("audio error: {e}");
+                    },
+                    None,
+                )
+            }
             _ => unreachable!("format was selected from f32 and i32"),
         }
     };
@@ -799,6 +965,10 @@ pub fn open(
         plugin: PluginPtr(plugin),
         stop,
         stopped,
+        callbacks,
+        stream_errors,
+        #[cfg(feature = "realtime-probe")]
+        probe_counters,
         sample_rate: f64::from(sample_rate),
         device_channels,
         in_ports,
@@ -872,6 +1042,25 @@ mod tests {
     };
     use std::sync::Mutex;
     use std::thread::ThreadId;
+
+    #[cfg(feature = "realtime-probe")]
+    #[test]
+    fn probe_records_actual_frames_timing_and_output_activity() {
+        let counters = ProbeCounters::default();
+        counters.record(512, None, 400, false);
+        counters.record(480, Some(11_000), 650, true);
+        assert_eq!(
+            counters.snapshot(),
+            ProbeSnapshot {
+                first_frames: 512,
+                min_frames: 480,
+                max_frames: 512,
+                max_gap_us: 11_000,
+                max_work_us: 650,
+                nonzero_callbacks: 1,
+            }
+        );
+    }
 
     #[test]
     fn asio_default_input_stays_on_selected_output_driver() {
