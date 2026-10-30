@@ -10,7 +10,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use clap_sys::{audio_buffer::clap_audio_buffer, plugin::clap_plugin, process::clap_process};
+use clap_sys::{
+    audio_buffer::clap_audio_buffer, events::clap_event_transport, plugin::clap_plugin,
+    process::clap_process,
+};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
@@ -22,6 +25,24 @@ use crate::loader::{self, PluginPtr};
 
 /// Frames per `process()` call at most — also the `max_frames_count` we activate with.
 pub const MAX_FRAMES: usize = 4096;
+/// Maximum number of timed events accepted in one preallocated block.
+pub const MAX_TIMED_EVENTS: usize = 256;
+
+/// One MIDI event at a sample offset in the next `process_timed` block.
+#[derive(Clone, Copy, Debug)]
+pub struct TimedMidi {
+    pub time: u32,
+    pub data: RawMidi,
+    pub is_live: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum TimedProcessError {
+    InvalidBuffer,
+    TooManyEvents,
+    EventOutsideBlock,
+    UnsortedEvents,
+}
 
 /// Stream options the user can override; `None` = device/backend default.
 #[derive(Clone, Debug, Default)]
@@ -200,7 +221,10 @@ impl Engine {
         // ponytail: every queued MIDI message lands at frame 0 of the next block —
         // sample-accurate timestamps need cpal's OutputCallbackInfo, add if it matters.
         self.events.clear();
-        while let Some(msg) = self.midi_rx.pop() {
+        // Keep room for the 32 UI events below; leave excess MIDI queued for
+        // later blocks so the preallocated event list never grows here.
+        for _ in 0..(MAX_TIMED_EVENTS - 32) {
+            let Some(msg) = self.midi_rx.pop() else { break };
             self.events.push_midi(msg, self.dialect, 0);
         }
         // Cap UI events per block: a burst (slider drag) spreads over several
@@ -226,13 +250,80 @@ impl Engine {
         let mut done = 0;
         while done < total {
             let frames = (total - done).min(MAX_FRAMES);
-            self.process_block(frames);
+            self.process_block(frames, None);
             self.interleave(data, done, frames);
             // Events belong to the first block only.
             self.events.clear();
             self.steady_time += frames as i64;
             done += frames;
         }
+    }
+
+    /// Process one prepared block without an audio device. The caller supplies
+    /// a CLAP transport snapshot and sorted events with offsets in `[0, frames)`.
+    /// Same-offset order is preserved. Queued live UI/MIDI messages are separate.
+    pub fn process_timed(
+        &mut self,
+        data: &mut [f32],
+        transport: &clap_event_transport,
+        midi: &[TimedMidi],
+    ) -> Result<(), TimedProcessError> {
+        if self.device_channels == 0 || !data.len().is_multiple_of(self.device_channels) {
+            return Err(TimedProcessError::InvalidBuffer);
+        }
+        let frames = data.len() / self.device_channels;
+        if frames == 0 || frames > MAX_FRAMES {
+            return Err(TimedProcessError::InvalidBuffer);
+        }
+        if midi.len() > MAX_TIMED_EVENTS {
+            return Err(TimedProcessError::TooManyEvents);
+        }
+        if midi.iter().any(|event| event.time as usize >= frames) {
+            return Err(TimedProcessError::EventOutsideBlock);
+        }
+        if midi.windows(2).any(|pair| pair[0].time > pair[1].time) {
+            return Err(TimedProcessError::UnsortedEvents);
+        }
+
+        let _audio_thread = AudioThreadGuard::enter();
+        let _guard = CurrentPluginGuard;
+        crate::thread_pool::set_current_plugin(self.plugin.0);
+
+        if self.stop.load(Ordering::Acquire) {
+            self.halt_processing();
+            data.fill(0.0);
+            return Ok(());
+        }
+        if !self.started && !self.start_failed {
+            let p = self.plugin.0;
+            let ok = unsafe { (*p).start_processing }.is_none_or(|start| unsafe { start(p) });
+            if ok {
+                self.started = true;
+            } else {
+                eprintln!("plugin.start_processing returned false — output is silent");
+                self.start_failed = true;
+            }
+        }
+        if self.start_failed {
+            data.fill(0.0);
+            return Ok(());
+        }
+
+        self.events.clear();
+        for event in midi {
+            let flags = if event.is_live {
+                clap_sys::events::CLAP_EVENT_IS_LIVE
+            } else {
+                0
+            };
+            self.events
+                .push_midi_with_flags(event.data, self.dialect, event.time, flags);
+        }
+        self.process_block(frames, Some(transport));
+        self.interleave(data, 0, frames);
+        self.events.clear();
+        self.steady_time += frames as i64;
+        Ok(())
     }
 
     /// `stop_processing` on the audio thread, once. Acks unconditionally so
@@ -248,7 +339,7 @@ impl Engine {
         self.stopped.store(true, Ordering::Release);
     }
 
-    fn process_block(&mut self, frames: usize) {
+    fn process_block(&mut self, frames: usize, transport: Option<&clap_event_transport>) {
         // The plugin asked (maybe from its GUI thread) for a params flush;
         // the spec wants it on the audio thread, so it happens here.
         if crate::host::take_params_flush_requested() {
@@ -279,7 +370,7 @@ impl Engine {
         let proc = clap_process {
             steady_time: self.steady_time,
             frames_count: frames as u32,
-            transport: ptr::null(),
+            transport: transport.map_or(ptr::null(), ptr::from_ref),
             audio_inputs: if self.in_ports.is_empty() {
                 ptr::null()
             } else {
@@ -640,11 +731,30 @@ fn open_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap_sys::events::{
+        CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE,
+        CLAP_TRANSPORT_HAS_SECONDS_TIMELINE, CLAP_TRANSPORT_HAS_TEMPO,
+        CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_PLAYING, clap_event_header,
+        clap_event_transport,
+    };
     use std::sync::Mutex;
     use std::thread::ThreadId;
 
     /// (entry point, calling thread) pairs, in call order.
     static CALLS: Mutex<Vec<(&'static str, ThreadId)>> = Mutex::new(Vec::new());
+
+    #[derive(Debug, PartialEq)]
+    struct TimedObservation {
+        steady_time: i64,
+        header: (u32, u16, u16),
+        flags: u32,
+        beats: i64,
+        seconds: i64,
+        tempo: f64,
+        signature: (u16, u16),
+        events: Vec<(u32, u32)>,
+    }
+    static TIMED: Mutex<Vec<TimedObservation>> = Mutex::new(Vec::new());
 
     unsafe extern "C" fn fake_start(_: *const clap_plugin) -> bool {
         CALLS
@@ -745,5 +855,189 @@ mod tests {
             "stop_processing on the process thread: {calls:?}"
         );
         assert!(stopped.load(Ordering::Acquire));
+    }
+
+    unsafe extern "C" fn fake_timed_process(_: *const clap_plugin, p: *const clap_process) -> i32 {
+        let p = unsafe { &*p };
+        let transport = unsafe { &*p.transport };
+        let input = unsafe { &*p.in_events };
+        let count = unsafe { input.size.unwrap()(input) };
+        let events = (0..count)
+            .map(|index| {
+                let header: *const clap_event_header = unsafe { input.get.unwrap()(input, index) };
+                let header = unsafe { &*header };
+                (header.time, header.flags)
+            })
+            .collect();
+        TIMED.lock().unwrap().push(TimedObservation {
+            steady_time: p.steady_time,
+            header: (
+                transport.header.size,
+                transport.header.space_id,
+                transport.header.type_,
+            ),
+            flags: transport.flags,
+            beats: transport.song_pos_beats,
+            seconds: transport.song_pos_seconds,
+            tempo: transport.tempo,
+            signature: (transport.tsig_num, transport.tsig_denom),
+            events,
+        });
+        1
+    }
+
+    #[test]
+    fn timed_block_reaches_plugin_with_transport_and_note_offsets() {
+        TIMED.lock().unwrap().clear();
+        let mut plugin = fake_plugin();
+        plugin.start_processing = None;
+        plugin.process = Some(fake_timed_process);
+        let mut engine = Engine::new(
+            &raw const plugin,
+            2,
+            None,
+            crate::events::queue(),
+            crate::events::queue(),
+            crate::events::queue(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        engine.dialect = Dialect::Midi;
+        let mut transport: clap_event_transport = unsafe { std::mem::zeroed() };
+        transport.header = clap_event_header {
+            size: size_of::<clap_event_transport>() as u32,
+            time: 0,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_: CLAP_EVENT_TRANSPORT,
+            flags: 0,
+        };
+        transport.flags = CLAP_TRANSPORT_HAS_TEMPO
+            | CLAP_TRANSPORT_HAS_BEATS_TIMELINE
+            | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE
+            | CLAP_TRANSPORT_HAS_TIME_SIGNATURE
+            | CLAP_TRANSPORT_IS_PLAYING;
+        transport.song_pos_beats = 1_i64 << 31;
+        transport.song_pos_seconds = 2_i64 << 31;
+        transport.tempo = 120.0;
+        transport.tsig_num = 4;
+        transport.tsig_denom = 4;
+        let notes = [
+            TimedMidi {
+                time: 1,
+                data: [0x90, 60, 100],
+                is_live: false,
+            },
+            TimedMidi {
+                time: 64,
+                data: [0x90, 64, 100],
+                is_live: true,
+            },
+            TimedMidi {
+                time: 127,
+                data: [0x80, 60, 0],
+                is_live: false,
+            },
+        ];
+        let mut data = [0.0_f32; 256];
+        engine.process_timed(&mut data, &transport, &notes).unwrap();
+        transport.song_pos_beats += 1_i64 << 30;
+        transport.song_pos_seconds += 1_i64 << 30;
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        let calls = TIMED.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            &[
+                TimedObservation {
+                    steady_time: 0,
+                    header: (
+                        size_of::<clap_event_transport>() as u32,
+                        CLAP_CORE_EVENT_SPACE_ID,
+                        CLAP_EVENT_TRANSPORT
+                    ),
+                    flags: transport.flags,
+                    beats: 1_i64 << 31,
+                    seconds: 2_i64 << 31,
+                    tempo: 120.0,
+                    signature: (4, 4),
+                    events: vec![(1, 0), (64, 1), (127, 0)],
+                },
+                TimedObservation {
+                    steady_time: 128,
+                    header: (
+                        size_of::<clap_event_transport>() as u32,
+                        CLAP_CORE_EVENT_SPACE_ID,
+                        CLAP_EVENT_TRANSPORT
+                    ),
+                    flags: transport.flags,
+                    beats: 3_i64 << 30,
+                    seconds: 5_i64 << 30,
+                    tempo: 120.0,
+                    signature: (4, 4),
+                    events: vec![],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn timed_block_rejects_invalid_offsets_and_buffers() {
+        let plugin = fake_plugin();
+        let mut engine = Engine::new(
+            &raw const plugin,
+            2,
+            None,
+            crate::events::queue(),
+            crate::events::queue(),
+            crate::events::queue(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let transport: clap_event_transport = unsafe { std::mem::zeroed() };
+        let mut audio = [0.0_f32; 256];
+        let note = |time| TimedMidi {
+            time,
+            data: [0x90, 60, 100],
+            is_live: false,
+        };
+        assert_eq!(
+            engine.process_timed(&mut audio[..3], &transport, &[]),
+            Err(TimedProcessError::InvalidBuffer)
+        );
+        assert_eq!(
+            engine.process_timed(&mut audio, &transport, &[note(128)]),
+            Err(TimedProcessError::EventOutsideBlock)
+        );
+        assert_eq!(
+            engine.process_timed(&mut audio, &transport, &[note(2), note(1)]),
+            Err(TimedProcessError::UnsortedEvents)
+        );
+        assert_eq!(
+            engine.process_timed(&mut audio, &transport, &vec![note(0); MAX_TIMED_EVENTS + 1]),
+            Err(TimedProcessError::TooManyEvents)
+        );
+    }
+
+    #[test]
+    fn live_midi_burst_stays_queued_after_preallocated_block_is_full() {
+        let mut plugin = fake_plugin();
+        plugin.start_processing = None;
+        plugin.process = None;
+        let midi = crate::events::queue();
+        for _ in 0..300 {
+            midi.push([0x90, 60, 100]).unwrap();
+        }
+        let mut engine = Engine::new(
+            &raw const plugin,
+            2,
+            None,
+            Arc::clone(&midi),
+            crate::events::queue(),
+            crate::events::queue(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        engine.dialect = Dialect::Midi;
+        engine.process(&mut [0.0_f32; 256]);
+        assert_eq!(midi.len(), 300 - (MAX_TIMED_EVENTS - 32));
     }
 }
