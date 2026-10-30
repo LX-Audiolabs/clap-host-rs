@@ -331,6 +331,20 @@ mod tests {
     }
 
     #[test]
+    fn push_midi_with_flags_preserves_header_flags() {
+        let mut l = EvList::with_capacity(4);
+        l.push_midi([0x90, 60, 100], Dialect::Midi, 0);
+        l.push_midi_with_flags([0x90, 61, 100], Dialect::Midi, 1, 0);
+        l.push_midi_with_flags([0x90, 62, 100], Dialect::Clap, 2, 0);
+
+        let list = l.as_input_events();
+        let flags: Vec<u32> = (0..3)
+            .map(|i| unsafe { (*ev_get(&raw const list, i)).flags })
+            .collect();
+        assert_eq!(flags, vec![CLAP_EVENT_IS_LIVE, 0, 0]);
+    }
+
+    #[test]
     fn capturing_output_keeps_param_value_and_gestures() {
         let q = queue::<PluginOutEvent>();
         let out = capturing_output_events(&q);

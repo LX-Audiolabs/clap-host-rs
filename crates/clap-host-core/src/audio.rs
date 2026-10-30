@@ -972,6 +972,8 @@ mod tests {
     }
 
     /// The CLAP spec requires start/stop_processing on the audio thread —
+    /// i.e. on the thread that runs `process` (here: this test thread under
+    /// `AudioThreadGuard`).
     /// i.e. on the thread that runs `process` (here: this test thread).
     #[test]
     fn start_and_stop_processing_run_on_the_process_thread() {
