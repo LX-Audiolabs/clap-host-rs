@@ -44,11 +44,28 @@ pub enum TimedProcessError {
     UnsortedEvents,
 }
 
-/// Stream options the user can override; `None` = device/backend default.
-#[derive(Clone, Debug, Default)]
+/// Stream options the user can override. An ASIO-enabled Windows build defaults
+/// to ASIO; `backend: None` explicitly selects CPAL's platform default.
+#[derive(Clone, Debug)]
 pub struct StreamSettings {
+    /// CPAL backend name, for example `wasapi` or `asio`.
+    pub backend: Option<String>,
     pub sample_rate: Option<u32>,
     pub buffer_size: Option<u32>,
+}
+
+impl Default for StreamSettings {
+    fn default() -> Self {
+        Self {
+            backend: if cfg!(all(windows, feature = "asio")) {
+                Some("asio".into())
+            } else {
+                None
+            },
+            sample_rate: None,
+            buffer_size: None,
+        }
+    }
 }
 
 /// Buffer sizes (frames per callback) offered in the UI.
@@ -190,6 +207,27 @@ impl Engine {
 
     /// cpal callback body. `data` is interleaved f32 for `device_channels`.
     pub fn process(&mut self, data: &mut [f32]) {
+        self.process_output(data, |sample| sample);
+    }
+
+    /// cpal callback body for an interleaved signed 32-bit device stream.
+    pub fn process_i32(&mut self, data: &mut [i32]) {
+        self.process_output(data, |sample| {
+            if !sample.is_finite() {
+                return 0;
+            }
+            let scaled = sample * 2_147_483_648.0;
+            if scaled >= i32::MAX as f32 {
+                i32::MAX
+            } else if scaled <= i32::MIN as f32 {
+                i32::MIN
+            } else {
+                scaled as i32
+            }
+        });
+    }
+
+    fn process_output<T: Copy + Default>(&mut self, data: &mut [T], convert: impl Fn(f32) -> T) {
         let _audio_thread = AudioThreadGuard::enter();
         let _guard = CurrentPluginGuard;
         crate::thread_pool::set_current_plugin(self.plugin.0);
@@ -201,7 +239,7 @@ impl Engine {
         // and acks via `stopped`, then keeps emitting silence until dropped.
         if self.stop.load(Ordering::Acquire) {
             self.halt_processing();
-            data.fill(0.0);
+            data.fill(T::default());
             return;
         }
         if !self.started && !self.start_failed {
@@ -215,7 +253,7 @@ impl Engine {
             }
         }
         if self.start_failed {
-            data.fill(0.0);
+            data.fill(T::default());
             return;
         }
         // ponytail: every queued MIDI message lands at frame 0 of the next block —
@@ -251,7 +289,7 @@ impl Engine {
         while done < total {
             let frames = (total - done).min(MAX_FRAMES);
             self.process_block(frames, None);
-            self.interleave(data, done, frames);
+            self.interleave_as(data, done, frames, &convert);
             // Events belong to the first block only.
             self.events.clear();
             self.steady_time += frames as i64;
@@ -391,11 +429,21 @@ impl Engine {
     /// Non-interleaved plugin output → interleaved device buffer. Fewer plugin
     /// channels than device channels: the last one is repeated (mono → stereo).
     fn interleave(&self, data: &mut [f32], frame_offset: usize, frames: usize) {
+        self.interleave_as(data, frame_offset, frames, &|sample| sample);
+    }
+
+    fn interleave_as<T>(
+        &self,
+        data: &mut [T],
+        frame_offset: usize,
+        frames: usize,
+        convert: &impl Fn(f32) -> T,
+    ) {
         let dev = self.device_channels;
         for ch in 0..dev {
             let src = &self.bufs[self.main_out_offset + ch.min(self.main_out_channels - 1)];
             for i in 0..frames {
-                data[(frame_offset + i) * dev + ch] = src[i];
+                data[(frame_offset + i) * dev + ch] = convert(src[i]);
             }
         }
     }
@@ -406,6 +454,77 @@ fn device_label(device: &cpal::Device) -> String {
     device
         .description()
         .map_or_else(|_| "<unnamed>".into(), |d| d.name().to_string())
+}
+
+fn choose_host(backend: Option<&str>) -> Result<cpal::Host, String> {
+    match backend {
+        None => Ok(cpal::default_host()),
+        Some(name) => {
+            let id = name
+                .parse()
+                .map_err(|_| format!("unknown or unavailable audio backend {name:?}"))?;
+            cpal::host_from_id(id).map_err(|e| format!("audio backend {name:?}: {e}"))
+        }
+    }
+}
+
+fn selected_input_name<'a>(
+    backend: Option<&str>,
+    input_name: Option<&'a str>,
+    output_name: &'a str,
+) -> Result<Option<&'a str>, String> {
+    if backend.is_some_and(|name| name.eq_ignore_ascii_case("asio")) {
+        if let Some(name) = input_name
+            && name != output_name
+        {
+            return Err(format!(
+                "ASIO input {name:?} must use the selected output driver {output_name:?}"
+            ));
+        }
+        return Ok(Some(output_name));
+    }
+    Ok(input_name)
+}
+
+/// Backend names accepted by `StreamSettings::backend` on this build.
+#[must_use]
+pub fn available_backends() -> Vec<String> {
+    cpal::available_hosts()
+        .into_iter()
+        .map(|id| id.name().to_ascii_lowercase())
+        .collect()
+}
+
+fn select_output_format(
+    configs: &[cpal::SupportedStreamConfigRange],
+    channels: u16,
+    rate: u32,
+) -> Option<cpal::SampleFormat> {
+    [cpal::SampleFormat::F32, cpal::SampleFormat::I32]
+        .into_iter()
+        .find(|&format| {
+            configs.iter().any(|c| {
+                c.channels() == channels
+                    && c.sample_format() == format
+                    && c.min_sample_rate() <= rate
+                    && rate <= c.max_sample_rate()
+            })
+        })
+}
+
+fn listed_sample_rates(
+    configs: &[cpal::SupportedStreamConfigRange],
+    channels: u16,
+    default_rate: u32,
+) -> Vec<u32> {
+    const COMMON: [u32; 6] = [44100, 48000, 88200, 96000, 176400, 192000];
+    let supports = |rate| select_output_format(configs, channels, rate).is_some();
+    let mut rates: Vec<u32> = COMMON.into_iter().filter(|&rate| supports(rate)).collect();
+    if supports(default_rate) {
+        rates.retain(|&rate| rate != default_rate);
+        rates.insert(0, default_rate);
+    }
+    rates
 }
 
 /// Clears the thread-pool's current-plugin pointer when `process` returns —
@@ -420,28 +539,44 @@ impl Drop for CurrentPluginGuard {
 /// Names of the available output devices, in `open()` order.
 #[must_use]
 pub fn output_devices() -> Vec<String> {
-    let Ok(devices) = cpal::default_host().output_devices() else {
-        return Vec::new();
-    };
-    devices.map(|d| device_label(&d)).collect()
+    output_devices_for(None).unwrap_or_default()
+}
+
+/// Output devices exposed by the requested backend.
+pub fn output_devices_for(backend: Option<&str>) -> Result<Vec<String>, String> {
+    let devices = choose_host(backend)?
+        .output_devices()
+        .map_err(|e| e.to_string())?;
+    Ok(devices.map(|d| device_label(&d)).collect())
 }
 
 /// Names of the available input devices.
 #[must_use]
 pub fn input_devices() -> Vec<String> {
-    let Ok(devices) = cpal::default_host().input_devices() else {
-        return Vec::new();
-    };
-    devices.map(|d| device_label(&d)).collect()
+    input_devices_for(None).unwrap_or_default()
+}
+
+/// Input devices exposed by the requested backend.
+pub fn input_devices_for(backend: Option<&str>) -> Result<Vec<String>, String> {
+    let devices = choose_host(backend)?
+        .input_devices()
+        .map_err(|e| e.to_string())?;
+    Ok(devices.map(|d| device_label(&d)).collect())
 }
 
 /// Sample rates `device_name` (or the default output device) supports, the
-/// device's current default rate first. Common rates only; falls back to just
-/// the default when enumeration fails.
+/// device's current default rate first when its format is supported.
 #[must_use]
 pub fn sample_rates(device_name: Option<&str>) -> Vec<u32> {
-    const COMMON: [u32; 6] = [44100, 48000, 88200, 96000, 176400, 192000];
-    let host = cpal::default_host();
+    sample_rates_for(None, device_name).unwrap_or_default()
+}
+
+/// Sample rates available on one output device in the requested backend.
+pub fn sample_rates_for(
+    backend: Option<&str>,
+    device_name: Option<&str>,
+) -> Result<Vec<u32>, String> {
+    let host = choose_host(backend)?;
     let device = match device_name {
         Some(want) => host
             .output_devices()
@@ -450,26 +585,20 @@ pub fn sample_rates(device_name: Option<&str>) -> Vec<u32> {
         None => host.default_output_device(),
     };
     let Some(device) = device else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Ok(default_cfg) = device.default_output_config() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let default_rate = default_cfg.sample_rate();
-    let ranges: Vec<(u32, u32)> = device
+    let configs: Vec<_> = device
         .supported_output_configs()
-        .map(|it| {
-            it.map(|c| (c.min_sample_rate(), c.max_sample_rate()))
-                .collect()
-        })
+        .map(Iterator::collect)
         .unwrap_or_default();
-    let mut rates: Vec<u32> = COMMON
-        .into_iter()
-        .filter(|r| ranges.iter().any(|(lo, hi)| lo <= r && r <= hi))
-        .collect();
-    rates.retain(|&r| r != default_rate);
-    rates.insert(0, default_rate);
-    rates
+    Ok(listed_sample_rates(
+        &configs,
+        default_cfg.channels(),
+        default_cfg.sample_rate(),
+    ))
 }
 
 /// A running stream plus the plugin activation that belongs to it. Dropping it
@@ -529,7 +658,7 @@ pub fn open(
     out_tx: Queue<PluginOutEvent>,
     settings: &StreamSettings,
 ) -> Result<Session, String> {
-    let audio_host = cpal::default_host();
+    let audio_host = choose_host(settings.backend.as_deref())?;
     let device = match device_name {
         Some(want) => audio_host
             .output_devices()
@@ -544,28 +673,20 @@ pub fn open(
         .default_output_config()
         .map_err(|e| format!("output config: {e}"))?;
 
-    if config.sample_format() != cpal::SampleFormat::F32 {
-        // ponytail: every current backend gives us f32; add conversion if one doesn't.
-        return Err(format!(
-            "unsupported sample format {:?} — add conversion if needed",
-            config.sample_format()
-        ));
-    }
-
     // cpal 0.17+: SampleRate is a u32 alias (no .0 newtype).
     let sample_rate = settings.sample_rate.unwrap_or_else(|| config.sample_rate());
-    if settings.sample_rate.is_some() {
-        let supported = device
-            .supported_output_configs()
-            .map_err(|e| format!("output configs: {e}"))?
-            .any(|c| c.min_sample_rate() <= sample_rate && sample_rate <= c.max_sample_rate());
-        if !supported {
-            return Err(format!(
-                "sample rate {sample_rate} Hz not supported by {}",
-                device_label(&device)
-            ));
-        }
-    }
+    let configs: Vec<_> = device
+        .supported_output_configs()
+        .map_err(|e| format!("output configs: {e}"))?
+        .collect();
+    let format =
+        select_output_format(&configs, config.channels(), sample_rate).ok_or_else(|| {
+            format!(
+                "{} does not support {sample_rate} Hz / {} channels in f32 or i32",
+                device_label(&device),
+                config.channels()
+            )
+        })?;
     let device_channels = config.channels() as usize;
 
     // Open a capture stream when the plugin declares audio input ports.
@@ -573,7 +694,10 @@ pub fn open(
         .iter()
         .sum::<u32>() as usize;
     let (capture_buf, in_stream) = if in_ch_count > 0 {
-        match open_input(sample_rate, in_ch_count, input_name) {
+        let output_name = device_label(&device);
+        let chosen_input =
+            selected_input_name(settings.backend.as_deref(), input_name, &output_name)?;
+        match open_input(&audio_host, sample_rate, in_ch_count, chosen_input) {
             Ok((buf, stream)) => (Some(buf), Some(stream)),
             Err(e) => {
                 eprintln!("warn: audio input: {e} — plugin inputs will be silence");
@@ -618,12 +742,21 @@ pub fn open(
             sample_rate,
             buffer_size,
         };
-        device.build_output_stream::<f32, _, _>(
-            stream_config,
-            move |data: &mut [f32], _| engine.process(data),
-            |e| eprintln!("audio error: {e}"),
-            None,
-        )
+        match format {
+            cpal::SampleFormat::F32 => device.build_output_stream::<f32, _, _>(
+                stream_config,
+                move |data: &mut [f32], _| engine.process(data),
+                |e| eprintln!("audio error: {e}"),
+                None,
+            ),
+            cpal::SampleFormat::I32 => device.build_output_stream::<i32, _, _>(
+                stream_config,
+                move |data: &mut [i32], _| engine.process_i32(data),
+                |e| eprintln!("audio error: {e}"),
+                None,
+            ),
+            _ => unreachable!("format was selected from f32 and i32"),
+        }
     };
     let requested = settings
         .buffer_size
@@ -678,11 +811,11 @@ pub fn open(
 /// `want` of `None` picks the default input device.
 /// Non-fatal: caller warns and falls back to silence on any error.
 fn open_input(
+    host: &cpal::Host,
     rate: cpal::SampleRate,
     plugin_in_ch: usize,
     want: Option<&str>,
 ) -> Result<(Arc<ArrayQueue<f32>>, cpal::Stream), String> {
-    let host = cpal::default_host();
     let dev = match want {
         Some(name) => host
             .input_devices()
@@ -739,6 +872,73 @@ mod tests {
     };
     use std::sync::Mutex;
     use std::thread::ThreadId;
+
+    #[test]
+    fn asio_default_input_stays_on_selected_output_driver() {
+        assert_eq!(
+            selected_input_name(Some("asio"), None, "Topping USB Audio Device"),
+            Ok(Some("Topping USB Audio Device"))
+        );
+        assert_eq!(
+            selected_input_name(
+                Some("asio"),
+                Some("Topping USB Audio Device"),
+                "Topping USB Audio Device"
+            ),
+            Ok(Some("Topping USB Audio Device"))
+        );
+        assert!(
+            selected_input_name(
+                Some("asio"),
+                Some("Voicemeeter"),
+                "Topping USB Audio Device"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            selected_input_name(Some("wasapi"), None, "Topping USB Audio Device"),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn output_format_matches_requested_rate_and_channels() {
+        let range = |channels, low, high, format| {
+            cpal::SupportedStreamConfigRange::new(
+                channels,
+                low,
+                high,
+                cpal::SupportedBufferSize::Unknown,
+                format,
+            )
+        };
+        let configs = [
+            range(2, 44_100, 44_100, cpal::SampleFormat::F32),
+            range(1, 48_000, 48_000, cpal::SampleFormat::F32),
+            range(2, 48_000, 48_000, cpal::SampleFormat::I32),
+        ];
+        assert_eq!(
+            select_output_format(&configs, 2, 48_000),
+            Some(cpal::SampleFormat::I32)
+        );
+        assert_eq!(select_output_format(&configs, 2, 96_000), None);
+        assert_eq!(
+            listed_sample_rates(&configs, 2, 96_000),
+            vec![44_100, 48_000]
+        );
+    }
+
+    #[cfg(not(feature = "asio"))]
+    #[test]
+    fn unavailable_asio_backend_is_an_error() {
+        assert!(choose_host(Some("asio")).is_err());
+    }
+
+    #[cfg(all(windows, feature = "asio"))]
+    #[test]
+    fn asio_is_default_when_compiled_on_windows() {
+        assert_eq!(StreamSettings::default().backend.as_deref(), Some("asio"));
+    }
 
     /// (entry point, calling thread) pairs, in call order.
     static CALLS: Mutex<Vec<(&'static str, ThreadId)>> = Mutex::new(Vec::new());

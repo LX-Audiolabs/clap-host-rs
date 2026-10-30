@@ -177,6 +177,7 @@ fn main() {
         let settings = audio::StreamSettings {
             sample_rate: args.sample_rate,
             buffer_size: args.buffer_size,
+            ..audio::StreamSettings::default()
         };
         if args.gui {
             let (name, id) = unsafe { plugin_name_id(plugin) };
