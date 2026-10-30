@@ -38,6 +38,7 @@ use clap_sys::{
     version::CLAP_VERSION,
 };
 use crossbeam_queue::ArrayQueue;
+use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 use std::sync::LazyLock;
@@ -54,11 +55,38 @@ use std::time::{Duration, Instant};
 // ---------------------------------------------------------------------------
 
 static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
-static AUDIO_THREAD: OnceLock<ThreadId> = OnceLock::new();
+thread_local! {
+    static IN_AUDIO_CALLBACK: Cell<bool> = const { Cell::new(false) };
+}
+static AUDIO_LOGS_DROPPED: AtomicU32 = AtomicU32::new(0);
 
-/// Called once from the cpal callback so `is_audio_thread` can answer honestly.
+/// Marks only the active process/start/stop call as an audio-thread scope.
+pub(crate) struct AudioThreadGuard(bool);
+
+impl AudioThreadGuard {
+    pub(crate) fn enter() -> Self {
+        Self(IN_AUDIO_CALLBACK.with(|active| active.replace(true)))
+    }
+}
+
+impl Drop for AudioThreadGuard {
+    fn drop(&mut self) {
+        IN_AUDIO_CALLBACK.with(|active| active.set(self.0));
+    }
+}
+
+/// True during host audio processing. Used by the optional realtime probe /
+/// test allocator. Engine callbacks use [`AudioThreadGuard`]; this mirrors it.
+#[cfg(feature = "realtime-probe")]
+#[must_use]
+pub fn audio_callback_active() -> bool {
+    IN_AUDIO_CALLBACK.try_with(Cell::get).unwrap_or(false)
+}
+
+/// Mark a caller-managed audio thread. Engine callbacks use a scoped guard;
+/// external callers of this legacy API keep the marker until their thread exits.
 pub fn mark_audio_thread() {
-    let _ = AUDIO_THREAD.set(std::thread::current().id());
+    IN_AUDIO_CALLBACK.with(|active| active.set(true));
 }
 
 unsafe extern "C" fn host_log(
@@ -66,6 +94,10 @@ unsafe extern "C" fn host_log(
     severity: clap_log_severity,
     msg: *const c_char,
 ) {
+    if IN_AUDIO_CALLBACK.with(Cell::get) {
+        AUDIO_LOGS_DROPPED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     let text = if msg.is_null() {
         std::borrow::Cow::Borrowed("(null)")
     } else {
@@ -88,7 +120,7 @@ unsafe extern "C" fn host_is_main_thread(_: *const clap_host) -> bool {
 }
 
 unsafe extern "C" fn host_is_audio_thread(_: *const clap_host) -> bool {
-    AUDIO_THREAD.get() == Some(&std::thread::current().id())
+    IN_AUDIO_CALLBACK.with(Cell::get)
 }
 
 /// Set by `request_callback`; drained on the main thread by [`pump_main_thread`].
@@ -127,6 +159,10 @@ static PRESET_LOAD_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 /// Run the plugin's pending main-thread work. Call from the UI event loop.
 pub fn pump_main_thread(plugin: *const clap_plugin) {
+    let dropped = AUDIO_LOGS_DROPPED.swap(0, Ordering::Relaxed);
+    if dropped != 0 {
+        eprintln!("[plugin/warn] suppressed {dropped} log messages from audio callback");
+    }
     if CALLBACK_REQUESTED.swap(false, Ordering::AcqRel)
         && let Some(cb) = unsafe { (*plugin).on_main_thread }
     {
@@ -214,19 +250,28 @@ pub fn take_gui_hide_requested() -> bool {
 
 unsafe extern "C" fn host_gui_resize_hints_changed(_: *const clap_host) {}
 unsafe extern "C" fn host_gui_request_resize(_: *const clap_host, width: u32, height: u32) -> bool {
-    // [main-thread] per spec, so a plain Mutex is fine. Returning true means
-    // "accepted" — the GUI drains the pending size on its next poll and
+    // Reject from the audio thread; [main-thread] per spec. Returning true
+    // means "accepted" — the GUI drains the pending size on its next poll and
     // applies it to the embedded socket, or discards it when floating.
+    if IN_AUDIO_CALLBACK.with(Cell::get) {
+        return false;
+    }
     if let Ok(mut slot) = RESIZE_REQUESTED.lock() {
         *slot = Some((width, height));
     }
     true
 }
 unsafe extern "C" fn host_gui_request_show(_: *const clap_host) -> bool {
+    if IN_AUDIO_CALLBACK.with(Cell::get) {
+        return false;
+    }
     GUI_SHOW_REQUESTED.store(true, Ordering::Release);
     true
 }
 unsafe extern "C" fn host_gui_request_hide(_: *const clap_host) -> bool {
+    if IN_AUDIO_CALLBACK.with(Cell::get) {
+        return false;
+    }
     GUI_HIDE_REQUESTED.store(true, Ordering::Release);
     true
 }
@@ -732,5 +777,45 @@ mod tests {
         }
         let unknown = c"clap.definitely-not-real";
         assert!(unsafe { get(host, unknown.as_ptr()) }.is_null());
+    }
+
+    #[test]
+    fn audio_thread_gui_requests_fail_on_audio_thread() {
+        let _audio_thread = AudioThreadGuard::enter();
+
+        assert!(!unsafe { host_gui_request_resize(ptr::null(), 0, 480) });
+        assert!(!unsafe { host_gui_request_resize(ptr::null(), 640, 0) });
+        assert!(!unsafe { host_gui_request_resize(ptr::null(), 640, 480) });
+        assert!(!unsafe { host_gui_request_show(ptr::null()) });
+        assert!(!unsafe { host_gui_request_hide(ptr::null()) });
+    }
+
+    #[test]
+    fn audio_callback_log_is_counted_for_main_thread_reporting() {
+        let before = AUDIO_LOGS_DROPPED.load(Ordering::Relaxed);
+        {
+            let _scope = AudioThreadGuard::enter();
+            unsafe { host_log(ptr::null(), CLAP_LOG_WARNING, c"rt warning".as_ptr()) };
+        }
+        assert_eq!(AUDIO_LOGS_DROPPED.load(Ordering::Relaxed), before + 1);
+    }
+
+    #[test]
+    fn audio_thread_check_tracks_each_processing_scope() {
+        let is_audio = || unsafe { host_is_audio_thread(ptr::null()) };
+        assert!(!is_audio());
+        {
+            let _scope = AudioThreadGuard::enter();
+            assert!(is_audio());
+        }
+        assert!(!is_audio());
+        std::thread::spawn(|| {
+            assert!(!unsafe { host_is_audio_thread(ptr::null()) });
+            let _scope = AudioThreadGuard::enter();
+            assert!(unsafe { host_is_audio_thread(ptr::null()) });
+        })
+        .join()
+        .unwrap();
+        assert!(!is_audio());
     }
 }

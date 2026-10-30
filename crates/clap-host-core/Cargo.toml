@@ -36,3 +36,5 @@ polling = "3"
 # and LLVM/Clang (LIBCLANG_PATH) at build time — off by default.
 default = []
 asio = ["cpal/asio"]
+# Opt-in marker for realtime alloc / callback probes (`audio_callback_active`).
+realtime-probe = []

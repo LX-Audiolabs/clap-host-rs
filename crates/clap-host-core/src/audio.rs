@@ -17,7 +17,7 @@ use crossbeam_queue::ArrayQueue;
 use crate::events::{
     Dialect, EvList, PluginOutEvent, Queue, RawMidi, UiEvent, capturing_output_events,
 };
-use crate::host::mark_audio_thread;
+use crate::host::AudioThreadGuard;
 use crate::loader::{self, PluginPtr};
 
 /// Frames per `process()` call at most — also the `max_frames_count` we activate with.
@@ -169,7 +169,7 @@ impl Engine {
 
     /// cpal callback body. `data` is interleaved f32 for `device_channels`.
     pub fn process(&mut self, data: &mut [f32]) {
-        mark_audio_thread();
+        let _audio_thread = AudioThreadGuard::enter();
         let _guard = CurrentPluginGuard;
         crate::thread_pool::set_current_plugin(self.plugin.0);
         if self.device_channels == 0 {
@@ -689,8 +689,8 @@ mod tests {
     }
 
     /// The CLAP spec requires start/stop_processing on the audio thread —
-    /// i.e. on the thread that runs `process` (here: this test thread, which
-    /// `mark_audio_thread` registered as the audio thread).
+    /// i.e. on the thread that runs `process` (here: this test thread under
+    /// `AudioThreadGuard`).
     #[test]
     fn start_and_stop_processing_run_on_the_process_thread() {
         let plugin = fake_plugin();
