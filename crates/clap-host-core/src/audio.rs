@@ -178,8 +178,8 @@ impl Default for StreamSettings {
 /// Buffer sizes (frames per callback) offered in the UI.
 pub const BUFFER_SIZES: [u32; 6] = [64, 128, 256, 512, 1024, 2048];
 
-/// Owns everything the audio thread touches. Buffers are allocated once; the
-/// callback never allocates.
+/// Owns everything the audio thread touches. Audio and event buffers are
+/// preallocated; full callback realtime safety requires separate verification.
 pub struct Engine {
     plugin: PluginPtr,
     device_channels: usize,
@@ -282,7 +282,7 @@ impl Engine {
             out_ports,
             main_out_channels,
             main_out_offset,
-            events: EvList::with_capacity(256),
+            events: EvList::with_capacity(MAX_TIMED_EVENTS),
             param_cookies: loader::params(plugin)
                 .iter()
                 .map(|p| (p.id, p.cookie))
@@ -363,6 +363,7 @@ impl Engine {
             data.fill(T::default());
             return;
         }
+
         // ponytail: every queued MIDI message lands at frame 0 of the next block —
         // sample-accurate timestamps need cpal's OutputCallbackInfo, add if it matters.
         self.events.clear();
@@ -1131,7 +1132,6 @@ mod tests {
 
     /// (entry point, calling thread) pairs, in call order.
     static CALLS: Mutex<Vec<(&'static str, ThreadId)>> = Mutex::new(Vec::new());
-
     #[derive(Debug, PartialEq)]
     struct TimedObservation {
         steady_time: i64,
@@ -1144,107 +1144,6 @@ mod tests {
         events: Vec<(u32, u32)>,
     }
     static TIMED: Mutex<Vec<TimedObservation>> = Mutex::new(Vec::new());
-
-    unsafe extern "C" fn fake_start(_: *const clap_plugin) -> bool {
-        CALLS
-            .lock()
-            .unwrap()
-            .push(("start", std::thread::current().id()));
-        true
-    }
-
-    unsafe extern "C" fn fake_stop(_: *const clap_plugin) {
-        CALLS
-            .lock()
-            .unwrap()
-            .push(("stop", std::thread::current().id()));
-    }
-
-    unsafe extern "C" fn fake_process(_: *const clap_plugin, _: *const clap_process) -> i32 {
-        CALLS
-            .lock()
-            .unwrap()
-            .push(("process", std::thread::current().id()));
-        0
-    }
-
-    /// Minimal vtable: no extensions (engine falls back to one stereo out
-    /// port), but start/stop/process record their calling thread.
-    fn fake_plugin() -> clap_plugin {
-        clap_plugin {
-            desc: ptr::null(),
-            plugin_data: ptr::null_mut(),
-            init: None,
-            destroy: None,
-            activate: None,
-            deactivate: None,
-            start_processing: Some(fake_start),
-            stop_processing: Some(fake_stop),
-            reset: None,
-            process: Some(fake_process),
-            get_extension: None,
-            on_main_thread: None,
-        }
-    }
-
-    /// The CLAP spec requires start/stop_processing on the audio thread —
-    /// i.e. on the thread that runs `process` (here: this test thread under
-    /// `AudioThreadGuard`).
-    #[test]
-    fn start_and_stop_processing_run_on_the_process_thread() {
-        let plugin = fake_plugin();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::new(AtomicBool::new(false));
-        let mut engine = Engine::new(
-            &raw const plugin,
-            2,
-            None,
-            crate::events::queue(),
-            crate::events::queue(),
-            crate::events::queue(),
-            Arc::clone(&stop),
-            Arc::clone(&stopped),
-        );
-        let here = std::thread::current().id();
-        let mut data = vec![0.0_f32; 512];
-
-        engine.process(&mut data);
-        engine.process(&mut data);
-        {
-            let calls = CALLS.lock().unwrap();
-            let on_this = |(n, t): &(&str, ThreadId)| *n == "process" && *t == here;
-            assert!(calls.iter().any(on_this), "process ran: {calls:?}");
-            assert_eq!(
-                calls.iter().filter(|(n, _)| *n == "start").count(),
-                1,
-                "start_processing exactly once: {calls:?}"
-            );
-            assert!(
-                calls
-                    .iter()
-                    .filter(|(n, _)| *n == "start")
-                    .all(|(_, t)| *t == here),
-                "start_processing on the process thread: {calls:?}"
-            );
-        }
-
-        stop.store(true, Ordering::Release);
-        engine.process(&mut data);
-        let calls = CALLS.lock().unwrap();
-        assert_eq!(
-            calls.iter().filter(|(n, _)| *n == "stop").count(),
-            1,
-            "stop_processing exactly once: {calls:?}"
-        );
-        assert!(
-            calls
-                .iter()
-                .filter(|(n, _)| *n == "stop")
-                .all(|(_, t)| *t == here),
-            "stop_processing on the process thread: {calls:?}"
-        );
-        assert!(stopped.load(Ordering::Acquire));
-    }
 
     unsafe extern "C" fn fake_timed_process(_: *const clap_plugin, p: *const clap_process) -> i32 {
         let p = unsafe { &*p };
@@ -1429,4 +1328,107 @@ mod tests {
         engine.process(&mut [0.0_f32; 256]);
         assert_eq!(midi.len(), 300 - (MAX_TIMED_EVENTS - 32));
     }
+
+    unsafe extern "C" fn fake_start(_: *const clap_plugin) -> bool {
+        CALLS
+            .lock()
+            .unwrap()
+            .push(("start", std::thread::current().id()));
+        true
+    }
+
+    unsafe extern "C" fn fake_stop(_: *const clap_plugin) {
+        CALLS
+            .lock()
+            .unwrap()
+            .push(("stop", std::thread::current().id()));
+    }
+
+    unsafe extern "C" fn fake_process(_: *const clap_plugin, _: *const clap_process) -> i32 {
+        CALLS
+            .lock()
+            .unwrap()
+            .push(("process", std::thread::current().id()));
+        0
+    }
+
+    /// Minimal vtable: no extensions (engine falls back to one stereo out
+    /// port), but start/stop/process record their calling thread.
+    fn fake_plugin() -> clap_plugin {
+        clap_plugin {
+            desc: ptr::null(),
+            plugin_data: ptr::null_mut(),
+            init: None,
+            destroy: None,
+            activate: None,
+            deactivate: None,
+            start_processing: Some(fake_start),
+            stop_processing: Some(fake_stop),
+            reset: None,
+            process: Some(fake_process),
+            get_extension: None,
+            on_main_thread: None,
+        }
+    }
+
+    /// The CLAP spec requires start/stop_processing on the audio thread —
+    /// i.e. on the thread that runs `process` (here: this test thread under
+    /// `AudioThreadGuard`).
+    #[test]
+    fn start_and_stop_processing_run_on_the_process_thread() {
+        let plugin = fake_plugin();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let mut engine = Engine::new(
+            &raw const plugin,
+            2,
+            None,
+            crate::events::queue(),
+            crate::events::queue(),
+            crate::events::queue(),
+            Arc::clone(&stop),
+            Arc::clone(&stopped),
+        );
+        let here = std::thread::current().id();
+        let mut data = vec![0.0_f32; 512];
+
+        engine.process(&mut data);
+        engine.process(&mut data);
+        {
+            let calls = CALLS.lock().unwrap();
+            let on_this = |(n, t): &(&str, ThreadId)| *n == "process" && *t == here;
+            assert!(calls.iter().any(on_this), "process ran: {calls:?}");
+            assert_eq!(
+                calls.iter().filter(|(n, _)| *n == "start").count(),
+                1,
+                "start_processing exactly once: {calls:?}"
+            );
+            assert!(
+                calls
+                    .iter()
+                    .filter(|(n, _)| *n == "start")
+                    .all(|(_, t)| *t == here),
+                "start_processing on the process thread: {calls:?}"
+            );
+        }
+
+        stop.store(true, Ordering::Release);
+        engine.process(&mut data);
+        let calls = CALLS.lock().unwrap();
+        assert_eq!(
+            calls.iter().filter(|(n, _)| *n == "stop").count(),
+            1,
+            "stop_processing exactly once: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .filter(|(n, _)| *n == "stop")
+                .all(|(_, t)| *t == here),
+            "stop_processing on the process thread: {calls:?}"
+        );
+        assert!(stopped.load(Ordering::Acquire));
+    }
+
+
 }
