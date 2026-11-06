@@ -597,6 +597,7 @@ mod tests {
         unsafe { (out.try_push.unwrap())(out, header) }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn note_event(
         type_: u16,
         time: u32,
