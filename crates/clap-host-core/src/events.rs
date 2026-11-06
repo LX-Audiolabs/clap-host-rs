@@ -67,9 +67,10 @@ pub enum PluginNoteOut {
 /// Capacity of the preallocated timed note/MIDI output buffer.
 pub const MAX_NOTE_OUT: usize = 256;
 
-/// Preallocated plugin→host note/MIDI capture. Does not grow past `capacity`.
+/// Preallocated plugin→host note/MIDI capture. Does not grow past `cap`.
 pub struct NoteOutList {
     items: Vec<PluginNoteOut>,
+    cap: usize,
     params: *const ArrayQueue<PluginOutEvent>,
 }
 
@@ -78,6 +79,7 @@ impl NoteOutList {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
+            cap,
             params: ptr::null(),
         }
     }
@@ -96,7 +98,7 @@ impl NoteOutList {
     }
 
     fn try_push_note(&mut self, ev: PluginNoteOut) -> bool {
-        if self.items.len() >= self.items.capacity() {
+        if self.items.len() >= self.cap {
             return false;
         }
         self.items.push(ev);
@@ -725,6 +727,23 @@ mod tests {
             q.pop(),
             Some(PluginOutEvent::Value { id: 7, value: 0.5 })
         );
+    }
+
+    #[test]
+    fn note_out_list_ignores_spare_vec_capacity() {
+        let q = queue::<PluginOutEvent>();
+        let mut notes = NoteOutList::with_capacity(1);
+        notes.items.reserve(32);
+        assert!(
+            notes.items.capacity() > 1,
+            "need spare Vec capacity to pin the requested cap"
+        );
+        notes.set_params(&q);
+        let out = capturing_timed_output_events(&mut notes);
+        let on = note_event(CLAP_EVENT_NOTE_ON, 0, 0, -1, 0, 0, 60, 1.0);
+        assert!(push(&out, ptr::from_ref(&on.header)));
+        assert!(!push(&out, ptr::from_ref(&on.header)));
+        assert_eq!(notes.as_slice().len(), 1);
     }
 
     #[test]

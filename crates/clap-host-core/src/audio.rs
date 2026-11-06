@@ -441,6 +441,8 @@ impl Engine {
             return Err(TimedProcessError::UnsortedEvents);
         }
 
+        self.notes_out.clear();
+
         let _audio_thread = AudioThreadGuard::enter();
         let _guard = CurrentPluginGuard;
         crate::thread_pool::set_current_plugin(self.plugin.0);
@@ -466,7 +468,6 @@ impl Engine {
         }
 
         self.events.clear();
-        self.notes_out.clear();
         for event in midi {
             let flags = if event.is_live {
                 clap_sys::events::CLAP_EVENT_IS_LIVE
@@ -1696,6 +1697,31 @@ mod tests {
             Some(PluginOutEvent::Value { id: 7, value: 0.5 })
         );
         assert_eq!(engine.notes_out().len(), 1);
+    }
+
+    #[test]
+    fn timed_process_clears_notes_out_on_stop() {
+        let mut plugin = fake_plugin();
+        plugin.start_processing = None;
+        plugin.process = Some(fake_push_note_and_midi);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut engine = Engine::new(
+            &raw const plugin,
+            2,
+            None,
+            crate::events::queue(),
+            crate::events::queue(),
+            crate::events::queue(),
+            Arc::clone(&stop),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let transport = playing_transport();
+        let mut data = [0.0_f32; 256];
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        assert!(!engine.notes_out().is_empty());
+        stop.store(true, Ordering::Release);
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        assert!(engine.notes_out().is_empty());
     }
 
     #[test]
