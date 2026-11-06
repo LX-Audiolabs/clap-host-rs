@@ -18,7 +18,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
 use crate::events::{
-    Dialect, EvList, PluginOutEvent, Queue, RawMidi, UiEvent, capturing_output_events,
+    Dialect, EvList, MAX_NOTE_OUT, NoteOutList, PluginNoteOut, PluginOutEvent, Queue, RawMidi,
+    UiEvent, capturing_output_events, capturing_timed_output_events,
 };
 use crate::host::AudioThreadGuard;
 use crate::loader::{self, PluginPtr};
@@ -203,6 +204,8 @@ pub struct Engine {
     ui_rx: Queue<UiEvent>,
     /// Plugin → host param events captured from `process()` output events.
     out_tx: Queue<PluginOutEvent>,
+    /// Plugin → host note/MIDI events captured by `process_timed`.
+    notes_out: NoteOutList,
     dialect: Dialect,
     steady_time: i64,
     /// Interleaved f32 samples from the capture thread, or `None` for silence.
@@ -290,6 +293,7 @@ impl Engine {
             midi_rx,
             ui_rx,
             out_tx,
+            notes_out: NoteOutList::with_capacity(MAX_NOTE_OUT),
             dialect: loader::note_dialect(plugin),
             steady_time: 0,
             capture_buf,
@@ -310,6 +314,12 @@ impl Engine {
     #[must_use]
     pub fn dialect(&self) -> Dialect {
         self.dialect
+    }
+
+    /// Note/MIDI events the plugin emitted during the last `process_timed` call.
+    #[must_use]
+    pub fn notes_out(&self) -> &[PluginNoteOut] {
+        self.notes_out.as_slice()
     }
 
     /// cpal callback body. `data` is interleaved f32 for `device_channels`.
@@ -396,7 +406,7 @@ impl Engine {
         let mut done = 0;
         while done < total {
             let frames = (total - done).min(MAX_FRAMES);
-            self.process_block(frames, None);
+            self.process_block(frames, None, false);
             self.interleave_as(data, done, frames, &convert);
             // Events belong to the first block only.
             self.events.clear();
@@ -430,6 +440,8 @@ impl Engine {
         if midi.windows(2).any(|pair| pair[0].time > pair[1].time) {
             return Err(TimedProcessError::UnsortedEvents);
         }
+
+        self.notes_out.clear();
 
         let _audio_thread = AudioThreadGuard::enter();
         let _guard = CurrentPluginGuard;
@@ -465,7 +477,7 @@ impl Engine {
             self.events
                 .push_midi_with_flags(event.data, self.dialect, event.time, flags);
         }
-        self.process_block(frames, Some(transport));
+        self.process_block(frames, Some(transport), true);
         self.interleave(data, 0, frames);
         self.events.clear();
         self.steady_time += frames as i64;
@@ -485,7 +497,12 @@ impl Engine {
         self.stopped.store(true, Ordering::Release);
     }
 
-    fn process_block(&mut self, frames: usize, transport: Option<&clap_event_transport>) {
+    fn process_block(
+        &mut self,
+        frames: usize,
+        transport: Option<&clap_event_transport>,
+        capture_notes: bool,
+    ) {
         // The plugin asked (maybe from its GUI thread) for a params flush;
         // the spec wants it on the audio thread, so it happens here.
         if crate::host::take_params_flush_requested() {
@@ -511,7 +528,14 @@ impl Engine {
         }
 
         let in_ev = self.events.as_input_events();
-        let out_ev = capturing_output_events(&self.out_tx);
+        if capture_notes {
+            self.notes_out.set_params(&self.out_tx);
+        }
+        let out_ev = if capture_notes {
+            capturing_timed_output_events(&mut self.notes_out)
+        } else {
+            capturing_output_events(&self.out_tx)
+        };
 
         let proc = clap_process {
             steady_time: self.steady_time,
@@ -1035,13 +1059,17 @@ fn open_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::{PluginNoteOut, PluginOutEvent};
     use clap_sys::events::{
-        CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE,
+        CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON,
+        CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE,
         CLAP_TRANSPORT_HAS_SECONDS_TIMELINE, CLAP_TRANSPORT_HAS_TEMPO,
         CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_PLAYING, clap_event_header,
-        clap_event_transport,
+        clap_event_midi, clap_event_note, clap_event_param_value, clap_event_transport,
+        clap_output_events,
     };
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::thread::ThreadId;
 
     #[cfg(feature = "realtime-probe")]
@@ -1267,6 +1295,557 @@ mod tests {
         );
     }
 
+    fn playing_transport() -> clap_event_transport {
+        let mut transport: clap_event_transport = unsafe { std::mem::zeroed() };
+        transport.header = clap_event_header {
+            size: size_of::<clap_event_transport>() as u32,
+            time: 0,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_: CLAP_EVENT_TRANSPORT,
+            flags: 0,
+        };
+        transport.flags = CLAP_TRANSPORT_HAS_TEMPO
+            | CLAP_TRANSPORT_HAS_BEATS_TIMELINE
+            | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE
+            | CLAP_TRANSPORT_HAS_TIME_SIGNATURE
+            | CLAP_TRANSPORT_IS_PLAYING;
+        transport.tempo = 120.0;
+        transport.tsig_num = 4;
+        transport.tsig_denom = 4;
+        transport
+    }
+
+    fn engine_with(plugin: *const clap_plugin, out_tx: Queue<PluginOutEvent>) -> Engine {
+        Engine::new(
+            plugin,
+            2,
+            None,
+            crate::events::queue(),
+            crate::events::queue(),
+            out_tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    unsafe fn push_out(process: *const clap_process, header: *const clap_event_header) {
+        let out = unsafe { &*(*process).out_events };
+        unsafe { (out.try_push.unwrap())(out, header) };
+    }
+
+    unsafe extern "C" fn fake_push_note_and_midi(
+        _: *const clap_plugin,
+        process: *const clap_process,
+    ) -> i32 {
+        let note = clap_event_note {
+            header: clap_event_header {
+                size: size_of::<clap_event_note>() as u32,
+                time: 5,
+                space_id: CLAP_CORE_EVENT_SPACE_ID,
+                type_: CLAP_EVENT_NOTE_ON,
+                flags: 0,
+            },
+            note_id: -1,
+            port_index: 0,
+            channel: 0,
+            key: 64,
+            velocity: 1.0,
+        };
+        let midi = clap_event_midi {
+            header: clap_event_header {
+                size: size_of::<clap_event_midi>() as u32,
+                time: 6,
+                space_id: CLAP_CORE_EVENT_SPACE_ID,
+                type_: CLAP_EVENT_MIDI,
+                flags: 0,
+            },
+            port_index: 0,
+            data: [0x80, 64, 0],
+        };
+        unsafe {
+            push_out(process, ptr::from_ref(&note.header));
+            push_out(process, ptr::from_ref(&midi.header));
+        }
+        1
+    }
+
+    unsafe extern "C" fn fake_push_out_of_range_note(
+        _: *const clap_plugin,
+        process: *const clap_process,
+    ) -> i32 {
+        let frames = unsafe { (*process).frames_count };
+        let note = clap_event_note {
+            header: clap_event_header {
+                size: size_of::<clap_event_note>() as u32,
+                time: frames,
+                space_id: CLAP_CORE_EVENT_SPACE_ID,
+                type_: CLAP_EVENT_NOTE_ON,
+                flags: 0,
+            },
+            note_id: -1,
+            port_index: 0,
+            channel: 0,
+            key: 64,
+            velocity: 1.0,
+        };
+        unsafe { push_out(process, ptr::from_ref(&note.header)) };
+        1
+    }
+
+    unsafe extern "C" fn fake_push_param_and_note(
+        _: *const clap_plugin,
+        process: *const clap_process,
+    ) -> i32 {
+        let val = clap_event_param_value {
+            header: clap_event_header {
+                size: size_of::<clap_event_param_value>() as u32,
+                time: 0,
+                space_id: CLAP_CORE_EVENT_SPACE_ID,
+                type_: CLAP_EVENT_PARAM_VALUE,
+                flags: 0,
+            },
+            param_id: 7,
+            cookie: ptr::null_mut(),
+            note_id: -1,
+            port_index: -1,
+            channel: -1,
+            key: -1,
+            value: 0.5,
+        };
+        let note = clap_event_note {
+            header: clap_event_header {
+                size: size_of::<clap_event_note>() as u32,
+                time: 0,
+                space_id: CLAP_CORE_EVENT_SPACE_ID,
+                type_: CLAP_EVENT_NOTE_ON,
+                flags: 0,
+            },
+            note_id: -1,
+            port_index: 0,
+            channel: 0,
+            key: 64,
+            velocity: 1.0,
+        };
+        unsafe {
+            push_out(process, ptr::from_ref(&val.header));
+            push_out(process, ptr::from_ref(&note.header));
+        }
+        1
+    }
+
+    static SCRIPT_LOCK: Mutex<()> = Mutex::new(());
+    static SCRIPT: Mutex<Vec<Vec<PluginNoteOut>>> = Mutex::new(Vec::new());
+    static SEEN_TRANSPORT: Mutex<Vec<(u32, i64, f64, u32)>> = Mutex::new(Vec::new());
+    static PUSH_OK: AtomicUsize = AtomicUsize::new(0);
+    static PUSH_FAIL: AtomicUsize = AtomicUsize::new(0);
+
+    fn load_script(blocks: Vec<Vec<PluginNoteOut>>) {
+        *SCRIPT.lock().unwrap() = blocks;
+        SEEN_TRANSPORT.lock().unwrap().clear();
+        PUSH_OK.store(0, AtomicOrdering::SeqCst);
+        PUSH_FAIL.store(0, AtomicOrdering::SeqCst);
+    }
+
+    fn note_on(time: u32, key: i16) -> PluginNoteOut {
+        PluginNoteOut::Note {
+            type_: CLAP_EVENT_NOTE_ON,
+            time,
+            flags: 0,
+            note_id: -1,
+            port_index: 0,
+            channel: 0,
+            key,
+            velocity: 1.0,
+        }
+    }
+
+    fn note_off(time: u32, key: i16) -> PluginNoteOut {
+        PluginNoteOut::Note {
+            type_: CLAP_EVENT_NOTE_OFF,
+            time,
+            flags: 0,
+            note_id: -1,
+            port_index: 0,
+            channel: 0,
+            key,
+            velocity: 0.0,
+        }
+    }
+
+    fn note_type(ev: &PluginNoteOut) -> u16 {
+        match ev {
+            PluginNoteOut::Note { type_, .. } => *type_,
+            PluginNoteOut::Midi { .. } => CLAP_EVENT_MIDI,
+        }
+    }
+
+    fn note_time(ev: &PluginNoteOut) -> u32 {
+        match ev {
+            PluginNoteOut::Note { time, .. } | PluginNoteOut::Midi { time, .. } => *time,
+        }
+    }
+
+    fn note_key(ev: &PluginNoteOut) -> i16 {
+        match ev {
+            PluginNoteOut::Note { key, .. } => *key,
+            PluginNoteOut::Midi { .. } => -1,
+        }
+    }
+
+    fn note_times(events: &[PluginNoteOut]) -> Vec<u32> {
+        events.iter().map(note_time).collect()
+    }
+
+    fn note_keys(events: &[PluginNoteOut]) -> Vec<i16> {
+        events.iter().map(note_key).collect()
+    }
+
+    fn seen_flags() -> Vec<u32> {
+        SEEN_TRANSPORT.lock().unwrap().iter().map(|s| s.0).collect()
+    }
+
+    fn seen_beats() -> Vec<i64> {
+        SEEN_TRANSPORT.lock().unwrap().iter().map(|s| s.1).collect()
+    }
+
+    fn seen_tempos() -> Vec<f64> {
+        SEEN_TRANSPORT.lock().unwrap().iter().map(|s| s.2).collect()
+    }
+
+    fn push_ok() -> usize {
+        PUSH_OK.load(AtomicOrdering::SeqCst)
+    }
+
+    fn push_fail() -> usize {
+        PUSH_FAIL.load(AtomicOrdering::SeqCst)
+    }
+
+    fn push_note_out(out: &clap_output_events, ev: PluginNoteOut) -> bool {
+        match ev {
+            PluginNoteOut::Note {
+                type_,
+                time,
+                flags,
+                note_id,
+                port_index,
+                channel,
+                key,
+                velocity,
+            } => {
+                let note = clap_event_note {
+                    header: clap_event_header {
+                        size: size_of::<clap_event_note>() as u32,
+                        time,
+                        space_id: CLAP_CORE_EVENT_SPACE_ID,
+                        type_,
+                        flags,
+                    },
+                    note_id,
+                    port_index,
+                    channel,
+                    key,
+                    velocity,
+                };
+                unsafe { (out.try_push.unwrap())(out, ptr::from_ref(&note.header)) }
+            }
+            PluginNoteOut::Midi {
+                time,
+                flags,
+                port_index,
+                data,
+            } => {
+                let midi = clap_event_midi {
+                    header: clap_event_header {
+                        size: size_of::<clap_event_midi>() as u32,
+                        time,
+                        space_id: CLAP_CORE_EVENT_SPACE_ID,
+                        type_: CLAP_EVENT_MIDI,
+                        flags,
+                    },
+                    port_index,
+                    data,
+                };
+                unsafe { (out.try_push.unwrap())(out, ptr::from_ref(&midi.header)) }
+            }
+        }
+    }
+
+    unsafe extern "C" fn fake_scripted_process(
+        _: *const clap_plugin,
+        process: *const clap_process,
+    ) -> i32 {
+        let p = unsafe { &*process };
+        let transport = unsafe { &*p.transport };
+        SEEN_TRANSPORT.lock().unwrap().push((
+            transport.flags,
+            transport.song_pos_beats,
+            transport.tempo,
+            p.frames_count,
+        ));
+        let events = {
+            let mut script = SCRIPT.lock().unwrap();
+            if script.is_empty() {
+                Vec::new()
+            } else {
+                script.remove(0)
+            }
+        };
+        let out = unsafe { &*p.out_events };
+        for ev in events {
+            if push_note_out(out, ev) {
+                PUSH_OK.fetch_add(1, AtomicOrdering::SeqCst);
+            } else {
+                PUSH_FAIL.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        1
+    }
+
+    fn scripted_plugin() -> clap_plugin {
+        let mut plugin = fake_plugin();
+        plugin.start_processing = None;
+        plugin.process = Some(fake_scripted_process);
+        plugin
+    }
+
+    #[test]
+    fn timed_block_captures_plugin_note_and_midi_out() {
+        let mut plugin = fake_plugin();
+        plugin.start_processing = None;
+        plugin.process = Some(fake_push_note_and_midi);
+        let mut engine = engine_with(&raw const plugin, crate::events::queue());
+        let transport = playing_transport();
+        let mut data = [0.0_f32; 256];
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        assert_eq!(
+            engine.notes_out(),
+            &[
+                PluginNoteOut::Note {
+                    type_: CLAP_EVENT_NOTE_ON,
+                    time: 5,
+                    flags: 0,
+                    note_id: -1,
+                    port_index: 0,
+                    channel: 0,
+                    key: 64,
+                    velocity: 1.0
+                },
+                PluginNoteOut::Midi {
+                    time: 6,
+                    flags: 0,
+                    port_index: 0,
+                    data: [0x80, 64, 0]
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn live_process_does_not_capture_note_out() {
+        let mut plugin = fake_plugin();
+        plugin.start_processing = None;
+        plugin.process = Some(fake_push_note_and_midi);
+        let mut engine = engine_with(&raw const plugin, crate::events::queue());
+        engine.process(&mut [0.0_f32; 256]);
+        assert!(engine.notes_out().is_empty());
+    }
+
+    #[test]
+    fn timed_capture_keeps_out_of_range_output_time() {
+        let mut plugin = fake_plugin();
+        plugin.start_processing = None;
+        plugin.process = Some(fake_push_out_of_range_note);
+        let mut engine = engine_with(&raw const plugin, crate::events::queue());
+        let transport = playing_transport();
+        let mut data = [0.0_f32; 256];
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        match engine.notes_out() {
+            [
+                PluginNoteOut::Note {
+                    time: 128, key: 64, ..
+                },
+            ] => {}
+            other => panic!("expected time 128, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timed_process_still_forwards_param_feedback() {
+        let mut plugin = fake_plugin();
+        plugin.start_processing = None;
+        plugin.process = Some(fake_push_param_and_note);
+        let out_tx = crate::events::queue();
+        let mut engine = engine_with(&raw const plugin, Arc::clone(&out_tx));
+        let transport = playing_transport();
+        let mut data = [0.0_f32; 256];
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        assert_eq!(
+            out_tx.pop(),
+            Some(PluginOutEvent::Value { id: 7, value: 0.5 })
+        );
+        assert_eq!(engine.notes_out().len(), 1);
+    }
+
+    #[test]
+    fn timed_process_clears_notes_out_on_stop() {
+        let mut plugin = fake_plugin();
+        plugin.start_processing = None;
+        plugin.stop_processing = None;
+        plugin.process = Some(fake_push_note_and_midi);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut engine = Engine::new(
+            &raw const plugin,
+            2,
+            None,
+            crate::events::queue(),
+            crate::events::queue(),
+            crate::events::queue(),
+            Arc::clone(&stop),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let transport = playing_transport();
+        let mut data = [0.0_f32; 256];
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        assert!(!engine.notes_out().is_empty());
+        stop.store(true, Ordering::Release);
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        assert!(engine.notes_out().is_empty());
+    }
+
+    #[test]
+    fn timed_capture_event_at_last_legal_input_sample() {
+        let _g = SCRIPT_LOCK.lock().unwrap();
+        load_script(vec![vec![note_on(127, 60)]]);
+        let plugin = scripted_plugin();
+        let mut engine = engine_with(&raw const plugin, crate::events::queue());
+        engine.dialect = Dialect::Midi;
+        let mut data = [0.0_f32; 256];
+        engine
+            .process_timed(
+                &mut data,
+                &playing_transport(),
+                &[TimedMidi {
+                    time: 127,
+                    data: [0x90, 60, 100],
+                    is_live: false,
+                }],
+            )
+            .unwrap();
+        assert_eq!(note_times(engine.notes_out()), vec![127]);
+    }
+
+    #[test]
+    fn timed_capture_preserves_same_sample_off_then_on() {
+        let _g = SCRIPT_LOCK.lock().unwrap();
+        load_script(vec![vec![note_off(10, 60), note_on(10, 60)]]);
+        let plugin = scripted_plugin();
+        let mut engine = engine_with(&raw const plugin, crate::events::queue());
+        let mut data = [0.0_f32; 256];
+        engine
+            .process_timed(&mut data, &playing_transport(), &[])
+            .unwrap();
+        assert_eq!(
+            engine
+                .notes_out()
+                .iter()
+                .map(|e| (note_type(e), note_time(e), note_key(e)))
+                .collect::<Vec<_>>(),
+            vec![(CLAP_EVENT_NOTE_OFF, 10, 60), (CLAP_EVENT_NOTE_ON, 10, 60)]
+        );
+    }
+
+    #[test]
+    fn timed_capture_stop_then_resume_emits_scripted_offs() {
+        let _g = SCRIPT_LOCK.lock().unwrap();
+        load_script(vec![
+            vec![note_on(0, 60)],
+            vec![note_off(0, 60)],
+            vec![note_on(0, 60)],
+        ]);
+        let plugin = scripted_plugin();
+        let mut engine = engine_with(&raw const plugin, crate::events::queue());
+        let mut transport = playing_transport();
+        let mut data = [0.0_f32; 256];
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        assert_eq!(note_keys(engine.notes_out()), vec![60]);
+        assert_eq!(note_type(&engine.notes_out()[0]), CLAP_EVENT_NOTE_ON);
+
+        transport.flags &= !CLAP_TRANSPORT_IS_PLAYING;
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        assert_eq!(note_type(&engine.notes_out()[0]), CLAP_EVENT_NOTE_OFF);
+
+        transport.flags |= CLAP_TRANSPORT_IS_PLAYING;
+        transport.song_pos_beats += 1_i64 << 30;
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        assert_eq!(note_type(&engine.notes_out()[0]), CLAP_EVENT_NOTE_ON);
+        assert_eq!(
+            seen_flags(),
+            vec![
+                playing_transport().flags,
+                playing_transport().flags & !CLAP_TRANSPORT_IS_PLAYING,
+                playing_transport().flags,
+            ]
+        );
+    }
+
+    #[test]
+    fn timed_capture_seek_and_loop_jump_are_visible_to_plugin() {
+        let _g = SCRIPT_LOCK.lock().unwrap();
+        load_script(vec![
+            vec![note_on(0, 60)],
+            vec![note_off(0, 60), note_on(0, 67)],
+            vec![note_off(0, 67), note_on(0, 60)],
+        ]);
+        let plugin = scripted_plugin();
+        let mut engine = engine_with(&raw const plugin, crate::events::queue());
+        let mut transport = playing_transport();
+        let mut data = [0.0_f32; 256];
+        transport.song_pos_beats = 1_i64 << 31;
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        transport.song_pos_beats = 4_i64 << 31;
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        assert_eq!(note_keys(engine.notes_out()), vec![60, 67]);
+        transport.song_pos_beats = 1_i64 << 31;
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        assert_eq!(note_keys(engine.notes_out()), vec![67, 60]);
+        assert_eq!(seen_beats(), vec![1_i64 << 31, 4_i64 << 31, 1_i64 << 31]);
+    }
+
+    #[test]
+    fn timed_capture_tempo_change_across_blocks() {
+        let _g = SCRIPT_LOCK.lock().unwrap();
+        load_script(vec![vec![note_on(0, 60)], vec![note_on(0, 62)]]);
+        let plugin = scripted_plugin();
+        let mut engine = engine_with(&raw const plugin, crate::events::queue());
+        let mut transport = playing_transport();
+        let mut data = [0.0_f32; 128];
+        transport.tempo = 120.0;
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        transport.tempo = 140.0;
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
+        match engine.notes_out() {
+            [PluginNoteOut::Note { key: 62, .. }] => {}
+            other => panic!("expected key 62, got {other:?}"),
+        }
+        assert_eq!(seen_tempos(), vec![120.0, 140.0]);
+    }
+
+    #[test]
+    fn timed_capture_notes_out_overflow_stops_at_capacity() {
+        let _g = SCRIPT_LOCK.lock().unwrap();
+        let flood = vec![note_on(0, 60); MAX_NOTE_OUT + 1];
+        load_script(vec![flood]);
+        let plugin = scripted_plugin();
+        let mut engine = engine_with(&raw const plugin, crate::events::queue());
+        let mut data = [0.0_f32; 256];
+        engine
+            .process_timed(&mut data, &playing_transport(), &[])
+            .unwrap();
+        assert_eq!(engine.notes_out().len(), MAX_NOTE_OUT);
+        assert_eq!(push_ok(), MAX_NOTE_OUT);
+        assert_eq!(push_fail(), 1);
+    }
+
     #[test]
     fn timed_block_rejects_invalid_offsets_and_buffers() {
         let plugin = fake_plugin();
@@ -1429,6 +2008,4 @@ mod tests {
         );
         assert!(stopped.load(Ordering::Acquire));
     }
-
-
 }

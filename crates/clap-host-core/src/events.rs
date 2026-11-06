@@ -12,10 +12,11 @@ use crossbeam_queue::ArrayQueue;
 
 use clap_sys::{
     events::{
-        CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_IS_LIVE, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_OFF,
-        CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
-        CLAP_EVENT_PARAM_VALUE, clap_event_header, clap_event_midi, clap_event_note,
-        clap_event_param_gesture, clap_event_param_value, clap_input_events, clap_output_events,
+        CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_IS_LIVE, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_CHOKE,
+        CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON,
+        CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END, CLAP_EVENT_PARAM_VALUE,
+        clap_event_header, clap_event_midi, clap_event_note, clap_event_param_gesture,
+        clap_event_param_value, clap_input_events, clap_output_events,
     },
     id::clap_id,
 };
@@ -40,6 +41,69 @@ pub enum PluginOutEvent {
     Value { id: clap_id, value: f64 },
     GestureBegin { id: clap_id },
     GestureEnd { id: clap_id },
+}
+
+/// Note/MIDI events captured from `clap_process.out_events` on the timed path.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum PluginNoteOut {
+    Note {
+        type_: u16,
+        time: u32,
+        flags: u32,
+        note_id: i32,
+        port_index: i16,
+        channel: i16,
+        key: i16,
+        velocity: f64,
+    },
+    Midi {
+        time: u32,
+        flags: u32,
+        port_index: u16,
+        data: [u8; 3],
+    },
+}
+
+/// Capacity of the preallocated timed note/MIDI output buffer.
+pub const MAX_NOTE_OUT: usize = 256;
+
+/// Preallocated plugin→host note/MIDI capture. Does not grow past `cap`.
+pub struct NoteOutList {
+    items: Vec<PluginNoteOut>,
+    cap: usize,
+    params: *const ArrayQueue<PluginOutEvent>,
+}
+
+impl NoteOutList {
+    #[must_use]
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            items: Vec::with_capacity(cap),
+            cap,
+            params: ptr::null(),
+        }
+    }
+
+    pub fn set_params(&mut self, params: &Queue<PluginOutEvent>) {
+        self.params = Arc::as_ptr(params);
+    }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[PluginNoteOut] {
+        &self.items
+    }
+
+    fn try_push_note(&mut self, ev: PluginNoteOut) -> bool {
+        if self.items.len() >= self.cap {
+            return false;
+        }
+        self.items.push(ev);
+        true
+    }
 }
 
 /// Lock-free MPMC queue. Shared by `Arc` rather than split into producer and
@@ -237,6 +301,41 @@ pub fn sink_output_events() -> clap_output_events {
     }
 }
 
+fn capture_param_event(
+    q: &ArrayQueue<PluginOutEvent>,
+    h: &clap_event_header,
+    header: *const clap_event_header,
+) -> Option<bool> {
+    let ev = match h.type_ {
+        CLAP_EVENT_PARAM_VALUE => {
+            if (h.size as usize) < size_of::<clap_event_param_value>() {
+                return Some(true);
+            }
+            let p = unsafe { &*header.cast::<clap_event_param_value>() };
+            PluginOutEvent::Value {
+                id: p.param_id,
+                value: p.value,
+            }
+        }
+        CLAP_EVENT_PARAM_GESTURE_BEGIN => {
+            if (h.size as usize) < size_of::<clap_event_param_gesture>() {
+                return Some(true);
+            }
+            let p = unsafe { &*header.cast::<clap_event_param_gesture>() };
+            PluginOutEvent::GestureBegin { id: p.param_id }
+        }
+        CLAP_EVENT_PARAM_GESTURE_END => {
+            if (h.size as usize) < size_of::<clap_event_param_gesture>() {
+                return Some(true);
+            }
+            let p = unsafe { &*header.cast::<clap_event_param_gesture>() };
+            PluginOutEvent::GestureEnd { id: p.param_id }
+        }
+        _ => return None,
+    };
+    Some(q.push(ev).is_ok())
+}
+
 unsafe extern "C" fn ev_try_push_capture(
     list: *const clap_output_events,
     header: *const clap_event_header,
@@ -249,34 +348,58 @@ unsafe extern "C" fn ev_try_push_capture(
     if h.space_id != CLAP_CORE_EVENT_SPACE_ID {
         return true;
     }
-    let ev = match h.type_ {
-        CLAP_EVENT_PARAM_VALUE => {
-            if (h.size as usize) < size_of::<clap_event_param_value>() {
+    capture_param_event(q, h, header).unwrap_or(true)
+}
+
+unsafe extern "C" fn ev_try_push_timed(
+    list: *const clap_output_events,
+    header: *const clap_event_header,
+) -> bool {
+    if list.is_null() || header.is_null() {
+        return false;
+    }
+    let notes = unsafe { &mut *(*list).ctx.cast::<NoteOutList>() };
+    let h = unsafe { &*header };
+    if h.space_id != CLAP_CORE_EVENT_SPACE_ID {
+        return true;
+    }
+    if !notes.params.is_null() {
+        let q = unsafe { &*notes.params };
+        if let Some(ok) = capture_param_event(q, h, header) {
+            return ok;
+        }
+    }
+    match h.type_ {
+        CLAP_EVENT_NOTE_ON | CLAP_EVENT_NOTE_OFF | CLAP_EVENT_NOTE_CHOKE | CLAP_EVENT_NOTE_END => {
+            if (h.size as usize) < size_of::<clap_event_note>() {
                 return true;
             }
-            let p = unsafe { &*header.cast::<clap_event_param_value>() };
-            PluginOutEvent::Value {
-                id: p.param_id,
-                value: p.value,
-            }
+            let n = unsafe { &*header.cast::<clap_event_note>() };
+            notes.try_push_note(PluginNoteOut::Note {
+                type_: h.type_,
+                time: h.time,
+                flags: h.flags,
+                note_id: n.note_id,
+                port_index: n.port_index,
+                channel: n.channel,
+                key: n.key,
+                velocity: n.velocity,
+            })
         }
-        CLAP_EVENT_PARAM_GESTURE_BEGIN => {
-            if (h.size as usize) < size_of::<clap_event_param_gesture>() {
+        CLAP_EVENT_MIDI => {
+            if (h.size as usize) < size_of::<clap_event_midi>() {
                 return true;
             }
-            let p = unsafe { &*header.cast::<clap_event_param_gesture>() };
-            PluginOutEvent::GestureBegin { id: p.param_id }
+            let m = unsafe { &*header.cast::<clap_event_midi>() };
+            notes.try_push_note(PluginNoteOut::Midi {
+                time: h.time,
+                flags: h.flags,
+                port_index: m.port_index,
+                data: m.data,
+            })
         }
-        CLAP_EVENT_PARAM_GESTURE_END => {
-            if (h.size as usize) < size_of::<clap_event_param_gesture>() {
-                return true;
-            }
-            let p = unsafe { &*header.cast::<clap_event_param_gesture>() };
-            PluginOutEvent::GestureEnd { id: p.param_id }
-        }
-        _ => return true,
-    };
-    q.push(ev).is_ok()
+        _ => true,
+    }
 }
 
 /// Output list that forwards param value/gesture events into `q`.
@@ -287,6 +410,17 @@ pub fn capturing_output_events(q: &Queue<PluginOutEvent>) -> clap_output_events 
         // ArrayQueue behind the Arc — stable address for the call.
         ctx: Arc::as_ptr(q).cast::<c_void>().cast_mut(),
         try_push: Some(ev_try_push_capture),
+    }
+}
+
+/// Output list that forwards note/MIDI events into `notes` and param events
+/// into the queue bound by `NoteOutList::set_params`. `notes` must outlive
+/// the `clap_process` call.
+#[must_use]
+pub fn capturing_timed_output_events(notes: &mut NoteOutList) -> clap_output_events {
+    clap_output_events {
+        ctx: ptr::from_mut(notes).cast(),
+        try_push: Some(ev_try_push_timed),
     }
 }
 
@@ -459,5 +593,181 @@ mod tests {
         assert!(!unsafe { (out.try_push.unwrap())(&raw const out, ptr::null()) });
         let sink = sink_output_events();
         assert!(!unsafe { (out.try_push.unwrap())(&raw const sink, ptr::null()) });
+    }
+
+    fn push(out: &clap_output_events, header: *const clap_event_header) -> bool {
+        unsafe { (out.try_push.unwrap())(out, header) }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn note_event(
+        type_: u16,
+        time: u32,
+        flags: u32,
+        note_id: i32,
+        port_index: i16,
+        channel: i16,
+        key: i16,
+        velocity: f64,
+    ) -> clap_event_note {
+        clap_event_note {
+            header: header_with_flags(type_, size_of::<clap_event_note>(), time, flags),
+            note_id,
+            port_index,
+            channel,
+            key,
+            velocity,
+        }
+    }
+
+    fn midi_event(time: u32, flags: u32, port_index: u16, data: [u8; 3]) -> clap_event_midi {
+        clap_event_midi {
+            header: header_with_flags(CLAP_EVENT_MIDI, size_of::<clap_event_midi>(), time, flags),
+            port_index,
+            data,
+        }
+    }
+
+    fn param_value(id: clap_id, value: f64) -> clap_event_param_value {
+        clap_event_param_value {
+            header: header(
+                CLAP_EVENT_PARAM_VALUE,
+                size_of::<clap_event_param_value>(),
+                0,
+            ),
+            param_id: id,
+            cookie: ptr::null_mut(),
+            note_id: -1,
+            port_index: -1,
+            channel: -1,
+            key: -1,
+            value,
+        }
+    }
+
+    #[test]
+    fn capturing_timed_output_keeps_note_and_midi() {
+        let q = queue::<PluginOutEvent>();
+        let mut notes = NoteOutList::with_capacity(MAX_NOTE_OUT);
+        notes.set_params(&q);
+        let out = capturing_timed_output_events(&mut notes);
+        let on = note_event(CLAP_EVENT_NOTE_ON, 7, 0, 3, 1, 2, 60, 0.5);
+        let off = note_event(CLAP_EVENT_NOTE_OFF, 9, 0, 3, 1, 2, 60, 0.0);
+        let midi = midi_event(11, CLAP_EVENT_IS_LIVE, 4, [0x90, 64, 100]);
+        let val = param_value(42, 0.25);
+        assert!(push(&out, ptr::from_ref(&on.header)));
+        assert!(push(&out, ptr::from_ref(&off.header)));
+        assert!(push(&out, ptr::from_ref(&midi.header)));
+        assert!(push(&out, ptr::from_ref(&val.header)));
+        assert_eq!(
+            notes.as_slice(),
+            &[
+                PluginNoteOut::Note {
+                    type_: CLAP_EVENT_NOTE_ON,
+                    time: 7,
+                    flags: 0,
+                    note_id: 3,
+                    port_index: 1,
+                    channel: 2,
+                    key: 60,
+                    velocity: 0.5
+                },
+                PluginNoteOut::Note {
+                    type_: CLAP_EVENT_NOTE_OFF,
+                    time: 9,
+                    flags: 0,
+                    note_id: 3,
+                    port_index: 1,
+                    channel: 2,
+                    key: 60,
+                    velocity: 0.0
+                },
+                PluginNoteOut::Midi {
+                    time: 11,
+                    flags: CLAP_EVENT_IS_LIVE,
+                    port_index: 4,
+                    data: [0x90, 64, 100]
+                },
+            ]
+        );
+        assert_eq!(
+            q.pop(),
+            Some(PluginOutEvent::Value {
+                id: 42,
+                value: 0.25
+            })
+        );
+    }
+
+    #[test]
+    fn capturing_timed_output_overflow_returns_false() {
+        let q = queue::<PluginOutEvent>();
+        let mut notes = NoteOutList::with_capacity(2);
+        notes.set_params(&q);
+        let out = capturing_timed_output_events(&mut notes);
+        let on = note_event(CLAP_EVENT_NOTE_ON, 0, 0, -1, 0, 0, 60, 1.0);
+        assert!(push(&out, ptr::from_ref(&on.header)));
+        assert!(push(&out, ptr::from_ref(&on.header)));
+        assert!(!push(&out, ptr::from_ref(&on.header)));
+        assert_eq!(notes.as_slice().len(), 2);
+    }
+
+    #[test]
+    fn timed_capture_overflow_does_not_drop_params() {
+        let q = queue::<PluginOutEvent>();
+        let mut notes = NoteOutList::with_capacity(1);
+        notes.set_params(&q);
+        let out = capturing_timed_output_events(&mut notes);
+        let on = note_event(CLAP_EVENT_NOTE_ON, 0, 0, -1, 0, 0, 60, 1.0);
+        let val = param_value(7, 0.5);
+        assert!(push(&out, ptr::from_ref(&on.header)));
+        assert!(!push(&out, ptr::from_ref(&on.header)));
+        assert!(push(&out, ptr::from_ref(&val.header)));
+        assert_eq!(q.pop(), Some(PluginOutEvent::Value { id: 7, value: 0.5 }));
+    }
+
+    #[test]
+    fn note_out_list_ignores_spare_vec_capacity() {
+        let q = queue::<PluginOutEvent>();
+        let mut notes = NoteOutList::with_capacity(1);
+        notes.items.reserve(32);
+        assert!(
+            notes.items.capacity() > 1,
+            "need spare Vec capacity to pin the requested cap"
+        );
+        notes.set_params(&q);
+        let out = capturing_timed_output_events(&mut notes);
+        let on = note_event(CLAP_EVENT_NOTE_ON, 0, 0, -1, 0, 0, 60, 1.0);
+        assert!(push(&out, ptr::from_ref(&on.header)));
+        assert!(!push(&out, ptr::from_ref(&on.header)));
+        assert_eq!(notes.as_slice().len(), 1);
+    }
+
+    #[test]
+    fn timed_capture_full_param_queue_still_keeps_notes() {
+        let q = queue::<PluginOutEvent>();
+        let mut notes = NoteOutList::with_capacity(MAX_NOTE_OUT);
+        notes.set_params(&q);
+        let out = capturing_timed_output_events(&mut notes);
+        let val = param_value(7, 0.5);
+        for _ in 0..QUEUE_CAP {
+            assert!(push(&out, ptr::from_ref(&val.header)));
+        }
+        assert!(!push(&out, ptr::from_ref(&val.header)));
+        let on = note_event(CLAP_EVENT_NOTE_ON, 3, 0, -1, 0, 0, 61, 1.0);
+        assert!(push(&out, ptr::from_ref(&on.header)));
+        assert_eq!(
+            notes.as_slice(),
+            &[PluginNoteOut::Note {
+                type_: CLAP_EVENT_NOTE_ON,
+                time: 3,
+                flags: 0,
+                note_id: -1,
+                port_index: 0,
+                channel: 0,
+                key: 61,
+                velocity: 1.0
+            }]
+        );
     }
 }
