@@ -1059,15 +1059,15 @@ fn open_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::{PluginNoteOut, PluginOutEvent};
     use clap_sys::events::{
         CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON,
-        CLAP_EVENT_PARAM_VALUE,
-        CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE,
-        CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_PLAYING,
-        clap_event_header, clap_event_midi, clap_event_note, clap_event_param_value,
-        clap_event_transport, clap_output_events,
+        CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE,
+        CLAP_TRANSPORT_HAS_SECONDS_TIMELINE, CLAP_TRANSPORT_HAS_TEMPO,
+        CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_PLAYING, clap_event_header,
+        clap_event_midi, clap_event_note, clap_event_param_value, clap_event_transport,
+        clap_output_events,
     };
-    use crate::events::{PluginNoteOut, PluginOutEvent};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::thread::ThreadId;
@@ -1501,30 +1501,15 @@ mod tests {
     }
 
     fn seen_flags() -> Vec<u32> {
-        SEEN_TRANSPORT
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|s| s.0)
-            .collect()
+        SEEN_TRANSPORT.lock().unwrap().iter().map(|s| s.0).collect()
     }
 
     fn seen_beats() -> Vec<i64> {
-        SEEN_TRANSPORT
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|s| s.1)
-            .collect()
+        SEEN_TRANSPORT.lock().unwrap().iter().map(|s| s.1).collect()
     }
 
     fn seen_tempos() -> Vec<f64> {
-        SEEN_TRANSPORT
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|s| s.2)
-            .collect()
+        SEEN_TRANSPORT.lock().unwrap().iter().map(|s| s.2).collect()
     }
 
     fn push_ok() -> usize {
@@ -1675,9 +1660,11 @@ mod tests {
         let mut data = [0.0_f32; 256];
         engine.process_timed(&mut data, &transport, &[]).unwrap();
         match engine.notes_out() {
-            [PluginNoteOut::Note {
-                time: 128, key: 64, ..
-            }] => {}
+            [
+                PluginNoteOut::Note {
+                    time: 128, key: 64, ..
+                },
+            ] => {}
             other => panic!("expected time 128, got {other:?}"),
         }
     }
@@ -1763,10 +1750,7 @@ mod tests {
                 .iter()
                 .map(|e| (note_type(e), note_time(e), note_key(e)))
                 .collect::<Vec<_>>(),
-            vec![
-                (CLAP_EVENT_NOTE_OFF, 10, 60),
-                (CLAP_EVENT_NOTE_ON, 10, 60)
-            ]
+            vec![(CLAP_EVENT_NOTE_OFF, 10, 60), (CLAP_EVENT_NOTE_ON, 10, 60)]
         );
     }
 
@@ -1782,23 +1766,17 @@ mod tests {
         let mut engine = engine_with(&raw const plugin, crate::events::queue());
         let mut transport = playing_transport();
         let mut data = [0.0_f32; 256];
-        engine
-            .process_timed(&mut data, &transport, &[])
-            .unwrap();
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
         assert_eq!(note_keys(engine.notes_out()), vec![60]);
         assert_eq!(note_type(&engine.notes_out()[0]), CLAP_EVENT_NOTE_ON);
 
         transport.flags &= !CLAP_TRANSPORT_IS_PLAYING;
-        engine
-            .process_timed(&mut data, &transport, &[])
-            .unwrap();
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
         assert_eq!(note_type(&engine.notes_out()[0]), CLAP_EVENT_NOTE_OFF);
 
         transport.flags |= CLAP_TRANSPORT_IS_PLAYING;
         transport.song_pos_beats += 1_i64 << 30;
-        engine
-            .process_timed(&mut data, &transport, &[])
-            .unwrap();
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
         assert_eq!(note_type(&engine.notes_out()[0]), CLAP_EVENT_NOTE_ON);
         assert_eq!(
             seen_flags(),
@@ -1823,18 +1801,12 @@ mod tests {
         let mut transport = playing_transport();
         let mut data = [0.0_f32; 256];
         transport.song_pos_beats = 1_i64 << 31;
-        engine
-            .process_timed(&mut data, &transport, &[])
-            .unwrap();
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
         transport.song_pos_beats = 4_i64 << 31;
-        engine
-            .process_timed(&mut data, &transport, &[])
-            .unwrap();
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
         assert_eq!(note_keys(engine.notes_out()), vec![60, 67]);
         transport.song_pos_beats = 1_i64 << 31;
-        engine
-            .process_timed(&mut data, &transport, &[])
-            .unwrap();
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
         assert_eq!(note_keys(engine.notes_out()), vec![67, 60]);
         assert_eq!(seen_beats(), vec![1_i64 << 31, 4_i64 << 31, 1_i64 << 31]);
     }
@@ -1848,13 +1820,9 @@ mod tests {
         let mut transport = playing_transport();
         let mut data = [0.0_f32; 128];
         transport.tempo = 120.0;
-        engine
-            .process_timed(&mut data, &transport, &[])
-            .unwrap();
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
         transport.tempo = 140.0;
-        engine
-            .process_timed(&mut data, &transport, &[])
-            .unwrap();
+        engine.process_timed(&mut data, &transport, &[]).unwrap();
         match engine.notes_out() {
             [PluginNoteOut::Note { key: 62, .. }] => {}
             other => panic!("expected key 62, got {other:?}"),
@@ -2040,6 +2008,4 @@ mod tests {
         );
         assert!(stopped.load(Ordering::Acquire));
     }
-
-
 }

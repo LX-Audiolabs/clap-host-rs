@@ -723,10 +723,7 @@ mod tests {
         assert!(push(&out, ptr::from_ref(&on.header)));
         assert!(!push(&out, ptr::from_ref(&on.header)));
         assert!(push(&out, ptr::from_ref(&val.header)));
-        assert_eq!(
-            q.pop(),
-            Some(PluginOutEvent::Value { id: 7, value: 0.5 })
-        );
+        assert_eq!(q.pop(), Some(PluginOutEvent::Value { id: 7, value: 0.5 }));
     }
 
     #[test]
