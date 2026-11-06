@@ -1703,6 +1703,7 @@ mod tests {
     fn timed_process_clears_notes_out_on_stop() {
         let mut plugin = fake_plugin();
         plugin.start_processing = None;
+        plugin.stop_processing = None;
         plugin.process = Some(fake_push_note_and_midi);
         let stop = Arc::new(AtomicBool::new(false));
         let mut engine = Engine::new(
